@@ -45,7 +45,7 @@ export default function Settings() {
         .from('users')
         .select('telegram_api_id, telegram_api_hash, monitoring_enabled')
         .eq('id', user.id)
-        .single();
+        .maybeSingle();
 
       if (fetchError) throw fetchError;
 
@@ -73,12 +73,13 @@ export default function Settings() {
 
       const { error: updateError } = await supabase
         .from('users')
-        .update({
+        .upsert({
+          id: user.id,
+          email: user.email,
           telegram_api_id: settings.telegram_api_id || null,
           telegram_api_hash: settings.telegram_api_hash || null,
           updated_at: new Date().toISOString(),
-        })
-        .eq('id', user.id);
+        });
 
       if (updateError) throw updateError;
 
