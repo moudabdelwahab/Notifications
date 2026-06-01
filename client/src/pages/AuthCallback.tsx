@@ -14,40 +14,52 @@ export default function AuthCallback() {
   const [isProcessing, setIsProcessing] = useState(true);
 
   useEffect(() => {
-    const handleCallback = async () => {
-      try {
-        // Get the current session from Supabase
-        const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+    let mounted = true;
 
-        if (sessionError) {
-          throw sessionError;
-        }
+    const handleAuth = async () => {
+      try {
+        // Wait a bit for Supabase to process the hash fragments
+        const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+        
+        if (sessionError) throw sessionError;
 
         if (session?.user) {
-          // Session is valid, redirect to dashboard
-          setLocation('/dashboard');
-        } else {
-          // No session found, redirect back to login
-          setError('فشل تسجيل الدخول. يرجى المحاولة مرة أخرى.');
-          setTimeout(() => {
-            setLocation('/login');
-          }, 2000);
+          if (mounted) setLocation('/dashboard');
+          return;
         }
+
+        // If no session immediately, listen for changes (Supabase might still be processing)
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+          if (event === 'SIGNED_IN' && session?.user) {
+            subscription.unsubscribe();
+            if (mounted) setLocation('/dashboard');
+          }
+        });
+
+        // Timeout after 10 seconds if no session is found
+        setTimeout(() => {
+          if (mounted && isProcessing) {
+            subscription.unsubscribe();
+            setError('انتهت مهلة تسجيل الدخول. يرجى المحاولة مرة أخرى.');
+            setIsProcessing(false);
+            setTimeout(() => setLocation('/login'), 3000);
+          }
+        }, 10000);
+
       } catch (err) {
+        if (!mounted) return;
         const message = err instanceof Error ? err.message : 'حدث خطأ أثناء معالجة تسجيل الدخول';
         setError(message);
-        console.error('Auth callback error:', err);
-        
-        // Redirect to login after showing error
-        setTimeout(() => {
-          setLocation('/login');
-        }, 2000);
-      } finally {
         setIsProcessing(false);
+        setTimeout(() => setLocation('/login'), 3000);
       }
     };
 
-    handleCallback();
+    handleAuth();
+
+    return () => {
+      mounted = false;
+    };
   }, [setLocation]);
 
   return (
