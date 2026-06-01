@@ -1,7 +1,7 @@
 // Supabase configuration
 // Note: These are public credentials for client-side use
 export const SUPABASE_URL = 'https://ywjtqkkbxqnisduelgre.supabase.co';
-export const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl3anRxa2tieHFuaXNkdWVsZ3JlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzA5NDI2MjcsImV4cCI6MTc2MjQ3ODYyN30.7lP0kB5QqP_-8Yd_8Yd_8Yd_8Yd_8Yd_8Yd_8Yd_8Yd';
+export const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl3anRxa2tieHFuaXNkdWVsZ3JlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzNDA4MjEsImV4cCI6MjA5NTkxNjgyMX0.mswnD7P2GrFdljM3XsEiW-k2knK9RVHvwwxbkSQ9mPs';
 
 // Initialize Supabase client
 import { createClient } from '@supabase/supabase-js';
