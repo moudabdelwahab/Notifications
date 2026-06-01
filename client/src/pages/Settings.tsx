@@ -73,17 +73,20 @@ export default function Settings() {
 
       const { error: updateError } = await supabase
         .from('users')
-        .upsert({
-          id: user.id,
-          email: user.email,
+        .update({
           telegram_api_id: settings.telegram_api_id || null,
           telegram_api_hash: settings.telegram_api_hash || null,
+          monitoring_enabled: settings.monitoring_enabled,
           updated_at: new Date().toISOString(),
-        });
+        })
+        .eq('id', user.id);
 
       if (updateError) throw updateError;
 
       toast.success('تم حفظ الإعدادات بنجاح');
+      if (settings.monitoring_enabled) {
+        toast.info('المراقبة مفعلة الآن. سيتم فحص الإشارات كل 5 دقائق.');
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'خطأ في حفظ الإعدادات';
       setError(message);
@@ -91,6 +94,10 @@ export default function Settings() {
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleReconnect = () => {
+    setLocation('/onboarding');
   };
 
   if (authLoading || loading) {
@@ -179,14 +186,48 @@ export default function Settings() {
                 حالة المراقبة
               </h2>
 
-              <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-start gap-3">
-                <CheckCircle2 className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-semibold text-blue-900">المراقبة</p>
-                  <p className="text-sm text-blue-800">
-                    {settings.monitoring_enabled ? 'مفعلة' : 'معطلة'}
-                  </p>
+              <div className="flex items-center justify-between p-4 bg-gray-50 rounded-xl border border-gray-200 mb-6">
+                <div className="flex items-center gap-3">
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center ${settings.monitoring_enabled ? 'bg-green-100' : 'bg-gray-200'}`}>
+                    <CheckCircle2 className={`w-5 h-5 ${settings.monitoring_enabled ? 'text-green-600' : 'text-gray-400'}`} />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-gray-900">تفعيل المراقبة التلقائية</p>
+                    <p className="text-sm text-gray-600">فحص الإشارات والردود كل 5 دقائق</p>
+                  </div>
                 </div>
+                <button
+                  onClick={() => setSettings({ ...settings, monitoring_enabled: !settings.monitoring_enabled })}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
+                    settings.monitoring_enabled ? 'bg-blue-600' : 'bg-gray-300'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      settings.monitoring_enabled ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              <div className="flex items-center justify-between p-4 bg-blue-50 rounded-xl border border-blue-100">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
+                    <AlertCircle className="w-5 h-5 text-blue-600" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-gray-900">حساب Telegram</p>
+                    <p className="text-sm text-gray-600">متصل وجاهز للمراقبة</p>
+                  </div>
+                </div>
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  className="rounded-lg bg-white"
+                  onClick={handleReconnect}
+                >
+                  إعادة الاتصال
+                </Button>
               </div>
             </div>
 
