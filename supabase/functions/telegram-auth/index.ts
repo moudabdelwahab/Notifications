@@ -7,7 +7,6 @@ const corsHeaders = {
 }
 
 // In-memory store for OTP sessions
-// Key: phoneCodeHash, Value: { phoneNumber, apiId, apiHash, requestTime, codeHash }
 const otpSessions = new Map<string, {
   phoneNumber: string
   apiId: number
@@ -26,257 +25,325 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000)
 
-// Helper function to make HTTP requests to Telegram API
-async function callTelegramAPI(method: string, params: Record<string, any>) {
-  const url = `https://api.telegram.org/bot${Deno.env.get('TELEGRAM_BOT_TOKEN') || ''}/` + method
-  
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-    })
-    
-    if (!response.ok) {
-      throw new Error(`Telegram API error: ${response.statusText}`)
-    }
-    
-    return await response.json()
-  } catch (error) {
-    console.error(`Error calling Telegram API: ${error}`)
-    throw error
-  }
+// Helper function to encode string to base64 (Deno compatible)
+function encodeBase64(str: string): string {
+  return btoa(unescape(encodeURIComponent(str)))
 }
 
 // Helper function to generate a mock Telethon-compatible session string
 function generateMockTelethonSession(phone: string, apiId: number): string {
-  // This creates a base64-encoded session that mimics Telethon's StringSession format
-  // In production, this would be replaced with actual TDLib or GramJS session data
-  const sessionData = {
-    version: 1,
-    phone: phone,
-    api_id: apiId,
-    api_hash: '',
-    auth_key: Buffer.from(Array(256).fill(0)).toString('hex'),
-    dc_id: 2,
-    port: 443,
-    server_address: '149.154.167.51',
-    takeout_id: null,
+  try {
+    // Create a simple session object that mimics Telethon's StringSession format
+    const sessionData = {
+      version: 1,
+      phone: phone,
+      api_id: apiId,
+      auth_key: '0'.repeat(512), // Mock auth key
+      dc_id: 2,
+      port: 443,
+      server_address: '149.154.167.51',
+      takeout_id: null,
+    }
+    
+    const jsonStr = JSON.stringify(sessionData)
+    return encodeBase64(jsonStr)
+  } catch (error) {
+    console.error('Error generating session:', error)
+    throw new Error('Failed to generate session')
   }
-  
-  return Buffer.from(JSON.stringify(sessionData)).toString('base64')
 }
 
 serve(async (req) => {
+  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
   }
 
   try {
-    const supabaseClient = createClient(
-      Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-    )
+    // Initialize Supabase client
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')
+    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
 
-    // Get the user from the authorization header
+    if (!supabaseUrl || !supabaseKey) {
+      throw new Error('Missing Supabase configuration')
+    }
+
+    const supabaseClient = createClient(supabaseUrl, supabaseKey)
+
+    // Get authorization header
     const authHeader = req.headers.get('Authorization')
-    if (!authHeader) throw new Error('No authorization header')
+    if (!authHeader) {
+      return new Response(
+        JSON.stringify({ error: 'No authorization header' }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 401 }
+      )
+    }
+
+    // Verify user token
     const token = authHeader.replace('Bearer ', '')
     const { data: { user }, error: userError } = await supabaseClient.auth.getUser(token)
-    if (userError || !user) throw new Error('Unauthorized')
+    
+    if (userError || !user) {
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized' }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 401 }
+      )
+    }
 
-    const { action, phone, apiId, apiHash, code, phoneCodeHash } = await req.json()
+    // Parse request body
+    let body: any
+    try {
+      const bodyText = await req.text()
+      body = JSON.parse(bodyText)
+    } catch (error) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid JSON in request body' }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
+      )
+    }
 
+    const { action, phone, apiId, apiHash, code, phoneCodeHash } = body
+
+    // Handle send-otp action
     if (action === 'send-otp') {
       // Validate inputs
       if (!phone || !apiId || !apiHash) {
-        throw new Error('Missing required fields: phone, apiId, apiHash')
+        return new Response(
+          JSON.stringify({ error: 'Missing required fields: phone, apiId, apiHash' }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
+        )
       }
 
       // Validate phone format
       if (!/^\+\d{10,15}$/.test(phone)) {
-        throw new Error('Invalid phone number format')
+        return new Response(
+          JSON.stringify({ error: 'Invalid phone number format. Use international format like +966500000000' }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
+        )
       }
 
-      // Validate API ID and Hash
+      // Validate API ID
       const apiIdNum = parseInt(apiId)
       if (isNaN(apiIdNum) || apiIdNum <= 0) {
-        throw new Error('Invalid API ID')
+        return new Response(
+          JSON.stringify({ error: 'Invalid API ID. Must be a positive number' }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
+        )
       }
 
+      // Validate API Hash
       if (!apiHash || apiHash.length < 32) {
-        throw new Error('Invalid API Hash')
+        return new Response(
+          JSON.stringify({ error: 'Invalid API Hash. Must be at least 32 characters' }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
+        )
       }
 
-      // Generate a unique session ID for this OTP request
-      const sessionId = `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-      
-      // Generate a code hash (in real scenario, this would come from Telegram API)
-      const codeHash = Buffer.from(`${phone}_${Date.now()}`).toString('base64').substring(0, 32)
-      
-      // Store session info
-      otpSessions.set(sessionId, {
-        phoneNumber: phone,
-        apiId: apiIdNum,
-        apiHash: apiHash,
-        requestTime: Date.now(),
-        codeHash: codeHash
-      })
+      try {
+        // Generate unique session ID
+        const sessionId = `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+        const codeHash = encodeBase64(`${phone}_${Date.now()}`).substring(0, 32)
 
-      // Log for debugging
-      console.log(`OTP request initiated for ${phone}`)
+        // Store OTP session
+        otpSessions.set(sessionId, {
+          phoneNumber: phone,
+          apiId: apiIdNum,
+          apiHash: apiHash,
+          requestTime: Date.now(),
+          codeHash: codeHash
+        })
 
-      // Return success response
-      return new Response(JSON.stringify({
-        success: true,
-        phoneCodeHash: sessionId,
-        message: 'OTP request initiated. Check your Telegram app for the code.',
-        codeHash: codeHash,
-      }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        status: 200,
-      })
+        console.log(`OTP request initiated for ${phone}`)
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            phoneCodeHash: sessionId,
+            message: 'OTP request initiated. Check your Telegram app for the code.',
+            codeHash: codeHash,
+          }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
+        )
+      } catch (error) {
+        console.error('Error in send-otp:', error)
+        return new Response(
+          JSON.stringify({ error: `Failed to send OTP: ${error instanceof Error ? error.message : 'Unknown error'}` }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
+        )
+      }
     }
 
+    // Handle verify-otp action
     if (action === 'verify-otp') {
       // Validate inputs
       if (!code || !phoneCodeHash) {
-        throw new Error('Missing required fields: code, phoneCodeHash')
+        return new Response(
+          JSON.stringify({ error: 'Missing required fields: code, phoneCodeHash' }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
+        )
       }
 
-      // Get the session info
+      // Get session info
       const sessionInfo = otpSessions.get(phoneCodeHash)
       if (!sessionInfo) {
-        throw new Error('Invalid or expired OTP session. Please request a new code.')
+        return new Response(
+          JSON.stringify({ error: 'Invalid or expired OTP session. Please request a new code.' }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
+        )
       }
 
-      // Verify the code format
+      // Verify code format
       if (!/^\d{5,6}$/.test(code)) {
-        throw new Error('Invalid OTP format. Please enter 5-6 digits.')
+        return new Response(
+          JSON.stringify({ error: 'Invalid OTP format. Please enter 5-6 digits.' }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
+        )
       }
 
-      // Check if session is not too old (15 minutes timeout)
+      // Check session age
       const sessionAge = Date.now() - sessionInfo.requestTime
       if (sessionAge > 15 * 60 * 1000) {
         otpSessions.delete(phoneCodeHash)
-        throw new Error('OTP session expired. Please request a new code.')
+        return new Response(
+          JSON.stringify({ error: 'OTP session expired. Please request a new code.' }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
+        )
       }
 
-      // Log verification attempt
-      console.log(`OTP verification attempt for ${sessionInfo.phoneNumber}`)
+      try {
+        console.log(`OTP verification attempt for ${sessionInfo.phoneNumber}`)
 
-      // Generate a Telethon-compatible session string
-      const telethonSession = generateMockTelethonSession(
-        sessionInfo.phoneNumber,
-        sessionInfo.apiId
-      )
+        // Generate Telethon-compatible session string
+        const telethonSession = generateMockTelethonSession(
+          sessionInfo.phoneNumber,
+          sessionInfo.apiId
+        )
 
-      // Store the session in Supabase
-      const { error: sessionError } = await supabaseClient
-        .from('telegram_sessions')
-        .upsert({
-          user_id: user.id,
-          session_data: telethonSession,
-          phone: sessionInfo.phoneNumber,
-          updated_at: new Date().toISOString()
-        }, {
-          onConflict: 'user_id'
-        })
+        // Store session in Supabase
+        const { error: sessionError } = await supabaseClient
+          .from('telegram_sessions')
+          .upsert({
+            user_id: user.id,
+            session_data: telethonSession,
+            phone: sessionInfo.phoneNumber,
+            updated_at: new Date().toISOString()
+          }, {
+            onConflict: 'user_id'
+          })
 
-      if (sessionError) {
-        console.error('Session storage error:', sessionError)
-        throw new Error('Failed to store session. Please try again.')
+        if (sessionError) {
+          console.error('Session storage error:', sessionError)
+          return new Response(
+            JSON.stringify({ error: `Failed to store session: ${sessionError.message}` }),
+            { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
+          )
+        }
+
+        // Update user settings
+        const { error: updateError } = await supabaseClient
+          .from('users')
+          .update({
+            telegram_phone: sessionInfo.phoneNumber,
+            monitoring_enabled: true,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', user.id)
+
+        if (updateError) {
+          console.error('User update error:', updateError)
+          return new Response(
+            JSON.stringify({ error: `Failed to update user settings: ${updateError.message}` }),
+            { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
+          )
+        }
+
+        // Clean up OTP session
+        otpSessions.delete(phoneCodeHash)
+
+        console.log(`OTP verified successfully for ${sessionInfo.phoneNumber}`)
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            message: 'OTP verified successfully. Session created and stored.',
+            sessionCreated: true,
+            phone: sessionInfo.phoneNumber
+          }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
+        )
+      } catch (error) {
+        console.error('Error in verify-otp:', error)
+        return new Response(
+          JSON.stringify({ error: `Verification failed: ${error instanceof Error ? error.message : 'Unknown error'}` }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
+        )
       }
-
-      // Update user's phone number and enable monitoring
-      const { error: updateError } = await supabaseClient
-        .from('users')
-        .update({
-          telegram_phone: sessionInfo.phoneNumber,
-          monitoring_enabled: true,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', user.id)
-
-      if (updateError) {
-        console.error('User update error:', updateError)
-        throw new Error('Failed to update user settings. Please try again.')
-      }
-
-      // Clean up the OTP session
-      otpSessions.delete(phoneCodeHash)
-
-      console.log(`OTP verified successfully for ${sessionInfo.phoneNumber}`)
-
-      return new Response(JSON.stringify({
-        success: true,
-        message: 'OTP verified successfully. Session created and stored.',
-        sessionCreated: true,
-        phone: sessionInfo.phoneNumber
-      }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        status: 200,
-      })
     }
 
+    // Handle store-session action
     if (action === 'store-session') {
-      // Legacy action for storing pre-generated sessions
-      const { sessionData } = await req.json()
-      
+      const { sessionData } = body
+
       if (!sessionData || !phone) {
-        throw new Error('Missing required fields: sessionData, phone')
+        return new Response(
+          JSON.stringify({ error: 'Missing required fields: sessionData, phone' }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
+        )
       }
 
-      const { error: sessionError } = await supabaseClient
-        .from('telegram_sessions')
-        .upsert({
-          user_id: user.id,
-          session_data: sessionData,
-          phone: phone,
-          updated_at: new Date().toISOString()
-        }, {
-          onConflict: 'user_id'
-        })
+      try {
+        const { error: sessionError } = await supabaseClient
+          .from('telegram_sessions')
+          .upsert({
+            user_id: user.id,
+            session_data: sessionData,
+            phone: phone,
+            updated_at: new Date().toISOString()
+          }, {
+            onConflict: 'user_id'
+          })
 
-      if (sessionError) throw sessionError
+        if (sessionError) throw sessionError
 
-      // Update user's phone number
-      const { error: updateError } = await supabaseClient
-        .from('users')
-        .update({
-          telegram_phone: phone,
-          monitoring_enabled: true,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', user.id)
+        const { error: updateError } = await supabaseClient
+          .from('users')
+          .update({
+            telegram_phone: phone,
+            monitoring_enabled: true,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', user.id)
 
-      if (updateError) throw updateError
+        if (updateError) throw updateError
 
-      return new Response(JSON.stringify({ success: true }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        status: 200,
-      })
+        return new Response(
+          JSON.stringify({ success: true }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
+        )
+      } catch (error) {
+        console.error('Error in store-session:', error)
+        return new Response(
+          JSON.stringify({ error: `Failed to store session: ${error instanceof Error ? error.message : 'Unknown error'}` }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
+        )
+      }
     }
 
     // Unknown action
-    return new Response(JSON.stringify({
-      error: 'Unknown action. Supported actions: send-otp, verify-otp, store-session'
-    }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      status: 400,
-    })
+    return new Response(
+      JSON.stringify({
+        error: 'Unknown action. Supported actions: send-otp, verify-otp, store-session'
+      }),
+      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
+    )
 
   } catch (error) {
-    console.error('Error in telegram-auth function:', error)
-    
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred'
-    
-    return new Response(JSON.stringify({
-      error: errorMessage,
-      details: error instanceof Error ? error.stack : undefined
-    }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      status: 400,
-    })
+    console.error('Unexpected error:', error)
+    return new Response(
+      JSON.stringify({
+        error: `Unexpected error: ${error instanceof Error ? error.message : 'Unknown error'}`
+      }),
+      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
+    )
   }
 })

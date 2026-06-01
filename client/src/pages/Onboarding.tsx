@@ -108,12 +108,20 @@ export default function Onboarding() {
       });
 
       if (otpError) {
+        console.error('OTP Error:', otpError);
         // Check if it's a function not found error
         if (otpError.message?.includes('Function not found') || otpError.message?.includes('404')) {
           throw new Error('خدمة التحقق غير متاحة حالياً. يرجى التأكد من نشر Edge Function.');
         }
-        // Extract error message from response
-        const errorMsg = otpError.message || otpError.error?.message || 'فشل في إرسال الرمز';
+        // Try to extract error message from various possible locations
+        let errorMsg = 'فشل في إرسال الرمز';
+        if (otpError.message) {
+          errorMsg = otpError.message;
+        } else if (otpError.error?.message) {
+          errorMsg = otpError.error.message;
+        } else if (typeof otpError === 'string') {
+          errorMsg = otpError;
+        }
         throw new Error(errorMsg);
       }
 
@@ -122,6 +130,8 @@ export default function Onboarding() {
         setOtpSent(true);
         toast.success('تم إرسال رمز التحقق إلى حسابك في Telegram');
         setStep('otp-verify');
+      } else if (data?.error) {
+        throw new Error(data.error);
       } else {
         throw new Error('فشل في إرسال رمز التحقق');
       }
@@ -157,13 +167,27 @@ export default function Onboarding() {
       });
 
       if (verifyError) {
-        // Extract error message from response
-        const errorMsg = verifyError.message || verifyError.error?.message || 'فشل التحقق من الرمز';
+        console.error('Verify Error:', verifyError);
+        // Try to extract error message from various possible locations
+        let errorMsg = 'فشل التحقق من الرمز';
+        if (verifyError.message) {
+          errorMsg = verifyError.message;
+        } else if (verifyError.error?.message) {
+          errorMsg = verifyError.error.message;
+        } else if (typeof verifyError === 'string') {
+          errorMsg = verifyError;
+        }
         throw new Error(errorMsg);
       }
 
-      toast.success('تم التحقق بنجاح وإنشاء الجلسة');
-      setStep('complete');
+      if (data?.success) {
+        toast.success('تم التحقق بنجاح وإنشاء الجلسة');
+        setStep('complete');
+      } else if (data?.error) {
+        throw new Error(data.error);
+      } else {
+        throw new Error('فشل التحقق من الرمز');
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'رمز التحقق غير صحيح';
       setError(message);
