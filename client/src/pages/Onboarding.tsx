@@ -112,7 +112,9 @@ export default function Onboarding() {
         if (otpError.message?.includes('Function not found') || otpError.message?.includes('404')) {
           throw new Error('خدمة التحقق غير متاحة حالياً. يرجى التأكد من نشر Edge Function.');
         }
-        throw otpError;
+        // Extract error message from response
+        const errorMsg = otpError.message || otpError.error?.message || 'فشل في إرسال الرمز';
+        throw new Error(errorMsg);
       }
 
       if (data?.phoneCodeHash) {
@@ -127,6 +129,7 @@ export default function Onboarding() {
       const message = err instanceof Error ? err.message : 'خطأ في إرسال الرمز';
       setError(message);
       toast.error(message);
+      console.error('Send OTP error:', err);
     } finally {
       setLoading(false);
     }
@@ -154,13 +157,9 @@ export default function Onboarding() {
       });
 
       if (verifyError) {
-        if (verifyError.message?.includes('Invalid or expired OTP session')) {
-          throw new Error('انتهت صلاحية الجلسة. يرجى محاولة إرسال الرمز مرة أخرى.');
-        }
-        if (verifyError.message?.includes('Invalid OTP format')) {
-          throw new Error('صيغة الرمز غير صحيحة. يرجى إدخال 5-6 أرقام فقط.');
-        }
-        throw verifyError;
+        // Extract error message from response
+        const errorMsg = verifyError.message || verifyError.error?.message || 'فشل التحقق من الرمز';
+        throw new Error(errorMsg);
       }
 
       toast.success('تم التحقق بنجاح وإنشاء الجلسة');
@@ -169,6 +168,7 @@ export default function Onboarding() {
       const message = err instanceof Error ? err.message : 'رمز التحقق غير صحيح';
       setError(message);
       toast.error(message);
+      console.error('Verify OTP error:', err);
     } finally {
       setLoading(false);
     }
