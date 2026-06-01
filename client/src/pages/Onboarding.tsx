@@ -2,9 +2,10 @@ import { useState, useEffect } from 'react';
 import { useLocation } from 'wouter';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { InputOTP, InputOTPGroup, InputOTPSlot } from '@/components/ui/input-otp';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
-import { Loader2, ExternalLink, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Loader2, ExternalLink, CheckCircle2, AlertCircle, Phone, Lock, Key } from 'lucide-react';
 import { toast } from 'sonner';
 
 type OnboardingStep = 'welcome' | 'telegram-setup' | 'credentials' | 'phone-input' | 'otp-verify' | 'complete';
@@ -20,6 +21,7 @@ export default function Onboarding() {
   const [phoneCodeHash, setPhoneCodeHash] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [otpSent, setOtpSent] = useState(false);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -41,6 +43,18 @@ export default function Onboarding() {
       return;
     }
 
+    // Validate API ID is numeric
+    if (!/^\d+$/.test(apiId.trim())) {
+      setError('API ID يجب أن يكون رقماً');
+      return;
+    }
+
+    // Validate API Hash format
+    if (apiHash.trim().length < 32) {
+      setError('API Hash يجب أن يكون على الأقل 32 حرفاً');
+      return;
+    }
+
     try {
       setLoading(true);
       setError(null);
@@ -48,8 +62,8 @@ export default function Onboarding() {
       const { error: updateError } = await supabase
         .from('users')
         .update({
-          telegram_api_id: apiId,
-          telegram_api_hash: apiHash,
+          telegram_api_id: apiId.trim(),
+          telegram_api_hash: apiHash.trim(),
           updated_at: new Date().toISOString(),
         })
         .eq('id', user?.id);
@@ -73,38 +87,54 @@ export default function Onboarding() {
       return;
     }
 
+    // Validate phone format (basic validation)
+    if (!/^\+\d{10,15}$/.test(phone.trim())) {
+      setError('يرجى إدخال رقم هاتف صحيح بصيغة دولية (مثل +966500000000)');
+      return;
+    }
+
     try {
       setLoading(true);
       setError(null);
 
-      // هنا يتم استدعاء Edge Function لإرسال الرمز
-      // ملاحظة: في بيئة العرض التجريبي، سنقوم بمحاكاة النجاح أو توجيه المستخدم لكيفية الربط
+      // Call Edge Function to send OTP
       const { data, error: otpError } = await supabase.functions.invoke('telegram-auth', {
-        body: { action: 'send-otp', phone, apiId, apiHash }
+        body: {
+          action: 'send-otp',
+          phone: phone.trim(),
+          apiId: apiId.trim(),
+          apiHash: apiHash.trim()
+        }
       });
 
-      if (otpError) throw otpError;
+      if (otpError) {
+        // Check if it's a function not found error
+        if (otpError.message?.includes('Function not found') || otpError.message?.includes('404')) {
+          throw new Error('خدمة التحقق غير متاحة حالياً. يرجى التأكد من نشر Edge Function.');
+        }
+        throw otpError;
+      }
 
-      setPhoneCodeHash(data.phoneCodeHash);
-      toast.success('تم إرسال رمز التحقق إلى حسابك في Telegram');
-      setStep('otp-verify');
+      if (data?.phoneCodeHash) {
+        setPhoneCodeHash(data.phoneCodeHash);
+        setOtpSent(true);
+        toast.success('تم إرسال رمز التحقق إلى حسابك في Telegram');
+        setStep('otp-verify');
+      } else {
+        throw new Error('فشل في إرسال رمز التحقق');
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'خطأ في إرسال الرمز';
       setError(message);
       toast.error(message);
-      // للمحاكاة في حالة عدم وجود Edge Function مفعلة حالياً
-      if (message.includes('Function not found')) {
-         toast.info('محاكاة: تم الانتقال لخطوة التحقق (تأكد من إعداد Edge Functions)');
-         setStep('otp-verify');
-      }
     } finally {
       setLoading(false);
     }
   };
 
   const handleVerifyOTP = async () => {
-    if (!otp.trim()) {
-      setError('يرجى إدخال رمز التحقق');
+    if (!otp.trim() || otp.length < 5) {
+      setError('يرجى إدخال رمز التحقق الكامل');
       return;
     }
 
@@ -113,10 +143,25 @@ export default function Onboarding() {
       setError(null);
 
       const { data, error: verifyError } = await supabase.functions.invoke('telegram-auth', {
-        body: { action: 'verify-otp', phone, apiId, apiHash, code: otp, phoneCodeHash }
+        body: {
+          action: 'verify-otp',
+          phone: phone.trim(),
+          apiId: apiId.trim(),
+          apiHash: apiHash.trim(),
+          code: otp.trim(),
+          phoneCodeHash: phoneCodeHash
+        }
       });
 
-      if (verifyError) throw verifyError;
+      if (verifyError) {
+        if (verifyError.message?.includes('Invalid or expired OTP session')) {
+          throw new Error('انتهت صلاحية الجلسة. يرجى محاولة إرسال الرمز مرة أخرى.');
+        }
+        if (verifyError.message?.includes('Invalid OTP format')) {
+          throw new Error('صيغة الرمز غير صحيحة. يرجى إدخال 5-6 أرقام فقط.');
+        }
+        throw verifyError;
+      }
 
       toast.success('تم التحقق بنجاح وإنشاء الجلسة');
       setStep('complete');
@@ -124,10 +169,6 @@ export default function Onboarding() {
       const message = err instanceof Error ? err.message : 'رمز التحقق غير صحيح';
       setError(message);
       toast.error(message);
-      // للمحاكاة
-      if (message.includes('Function not found')) {
-         setStep('complete');
-      }
     } finally {
       setLoading(false);
     }
@@ -135,6 +176,13 @@ export default function Onboarding() {
 
   const handleComplete = () => {
     setLocation('/dashboard');
+  };
+
+  const handleResendOTP = () => {
+    setOtp('');
+    setError(null);
+    setOtpSent(false);
+    setStep('phone-input');
   };
 
   return (
@@ -151,9 +199,9 @@ export default function Onboarding() {
         </div>
 
         {/* Progress indicator */}
-        <div className="flex justify-between mb-12">
+        <div className="flex justify-between mb-12 overflow-x-auto">
           {(['welcome', 'telegram-setup', 'credentials', 'phone-input', 'otp-verify', 'complete'] as const).map((s, i) => (
-            <div key={s} className="flex-1 flex items-center">
+            <div key={s} className="flex-1 flex items-center min-w-max">
               <div
                 className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold transition-all ${
                   step === s || (step === 'complete' && i < 5) || (i < ['welcome', 'telegram-setup', 'credentials', 'phone-input', 'otp-verify', 'complete'].indexOf(step))
@@ -165,7 +213,7 @@ export default function Onboarding() {
               </div>
               {i < 5 && (
                 <div
-                  className={`flex-1 h-1 mx-1 transition-all ${
+                  className={`flex-1 h-1 mx-1 transition-all min-w-[20px] ${
                     (step === 'complete' || i < ['welcome', 'telegram-setup', 'credentials', 'phone-input', 'otp-verify', 'complete'].indexOf(step))
                       ? 'bg-blue-600'
                       : 'bg-gray-200'
@@ -328,7 +376,8 @@ export default function Onboarding() {
               )}
 
               <div>
-                <label className="block text-sm font-semibold text-gray-900 mb-2">
+                <label className="block text-sm font-semibold text-gray-900 mb-2 flex items-center gap-2">
+                  <Key className="w-4 h-4" />
                   API ID
                 </label>
                 <Input
@@ -337,19 +386,22 @@ export default function Onboarding() {
                   onChange={(e) => setApiId(e.target.value)}
                   placeholder="مثال: 1234567"
                   className="h-12 rounded-xl border-gray-300"
+                  disabled={loading}
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-semibold text-gray-900 mb-2">
+                <label className="block text-sm font-semibold text-gray-900 mb-2 flex items-center gap-2">
+                  <Lock className="w-4 h-4" />
                   API Hash
                 </label>
                 <Input
-                  type="text"
+                  type="password"
                   value={apiHash}
                   onChange={(e) => setApiHash(e.target.value)}
                   placeholder="مثال: abcdef1234567890abcdef1234567890"
                   className="h-12 rounded-xl border-gray-300"
+                  disabled={loading}
                 />
               </div>
 
@@ -399,7 +451,8 @@ export default function Onboarding() {
               )}
 
               <div>
-                <label className="block text-sm font-semibold text-gray-900 mb-2">
+                <label className="block text-sm font-semibold text-gray-900 mb-2 flex items-center gap-2">
+                  <Phone className="w-4 h-4" />
                   رقم الهاتف
                 </label>
                 <Input
@@ -408,7 +461,15 @@ export default function Onboarding() {
                   onChange={(e) => setPhone(e.target.value)}
                   placeholder="+966500000000"
                   className="h-12 rounded-xl border-gray-300"
+                  disabled={loading}
+                  dir="ltr"
                 />
+              </div>
+
+              <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+                <p className="text-sm text-blue-900">
+                  <strong>تلميح:</strong> استخدم الصيغة الدولية الكاملة مع رمز الدولة (مثل +966 للسعودية)
+                </p>
               </div>
 
               <div className="flex gap-3">
@@ -422,7 +483,7 @@ export default function Onboarding() {
                 </Button>
                 <Button
                   onClick={handleSendOTP}
-                  disabled={loading}
+                  disabled={loading || !phone.trim()}
                   className="flex-1 h-12 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl flex items-center justify-center gap-2"
                 >
                   {loading ? (
@@ -445,7 +506,7 @@ export default function Onboarding() {
                   التحقق من الرمز
                 </h2>
                 <p className="text-gray-600 mb-4">
-                  أدخل الرمز الذي وصلك في تطبيق Telegram
+                  أدخل الرمز الذي وصلك في تطبيق Telegram (5-6 أرقام)
                 </p>
               </div>
 
@@ -457,30 +518,51 @@ export default function Onboarding() {
               )}
 
               <div>
-                <label className="block text-sm font-semibold text-gray-900 mb-2">
+                <label className="block text-sm font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                  <Lock className="w-4 h-4" />
                   رمز التحقق (OTP)
                 </label>
-                <Input
-                  type="text"
-                  value={otp}
-                  onChange={(e) => setOtp(e.target.value)}
-                  placeholder="12345"
-                  className="h-12 rounded-xl border-gray-300 text-center text-2xl tracking-widest"
-                />
+                <div className="flex justify-center mb-6">
+                  <InputOTP
+                    maxLength={6}
+                    value={otp}
+                    onChange={setOtp}
+                    disabled={loading}
+                  >
+                    <InputOTPGroup>
+                      <InputOTPSlot index={0} />
+                      <InputOTPSlot index={1} />
+                      <InputOTPSlot index={2} />
+                    </InputOTPGroup>
+                    <InputOTPSlot index={3} />
+                    <InputOTPGroup>
+                      <InputOTPSlot index={4} />
+                      <InputOTPSlot index={5} />
+                    </InputOTPGroup>
+                  </InputOTP>
+                </div>
               </div>
+
+              {otpSent && (
+                <div className="bg-green-50 border border-green-200 rounded-xl p-4">
+                  <p className="text-sm text-green-900">
+                    <strong>تم إرسال الرمز:</strong> تحقق من تطبيق Telegram للحصول على رمز التحقق
+                  </p>
+                </div>
+              )}
 
               <div className="flex gap-3">
                 <Button
-                  onClick={() => setStep('phone-input')}
+                  onClick={handleResendOTP}
                   variant="outline"
                   className="flex-1 h-12 rounded-xl"
                   disabled={loading}
                 >
-                  رجوع
+                  إرسال مرة أخرى
                 </Button>
                 <Button
                   onClick={handleVerifyOTP}
-                  disabled={loading}
+                  disabled={loading || otp.length < 5}
                   className="flex-1 h-12 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl flex items-center justify-center gap-2"
                 >
                   {loading ? (
