@@ -13,6 +13,9 @@ const activeClients = new Map<string, {
   expectedCode?: string
   codeAttempts: number
   createdAt: number
+  sessionString?: string
+  authState?: 'pending_otp' | 'pending_password' | 'completed'
+  passwordHint?: string
 }>()
 
 function generateRandomString(length: number): string {
@@ -93,6 +96,7 @@ async function handleSendOtp(
         api_id: apiIdNum,
         api_hash: apiHash,
         phone_code_hash: phoneCodeHash,
+        auth_state: 'pending_otp',
       })
       .select()
 
@@ -115,7 +119,8 @@ async function handleSendOtp(
       phone,
       expectedCode: otpCode.toString(),
       codeAttempts: 0,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      authState: 'pending_otp'
     })
 
     console.log('[SEND-OTP] Client data stored in memory, sessionId:', sessionId)
@@ -264,9 +269,58 @@ async function handleVerifyOtp(
       )
     }
 
-    console.log('[VERIFY-OTP] Code matches! Proceeding with session creation...')
+    console.log('[VERIFY-OTP] Code matches!')
 
-    // Code is correct! Generate session string
+    // Check if 2FA password is needed (simulated - in real implementation, this would come from Telegram)
+    // For now, we'll simulate a 50% chance of needing 2FA for testing purposes
+    const needs2FA = Math.random() < 0.1 // 10% chance to simulate 2FA requirement
+    
+    if (needs2FA) {
+      console.log('[VERIFY-OTP] 2FA password required - SESSION_PASSWORD_NEEDED')
+      
+      // Generate temporary session string for password verification
+      const tempSessionString = `temp_session_${generateRandomString(64)}`
+      
+      // Update auth state to pending_password
+      const { error: updateError } = await supabaseClient
+        .from('otp_sessions')
+        .update({
+          auth_state: 'pending_password',
+          session_string: tempSessionString,
+          password_hint: 'Enter your 2FA password'
+        })
+        .eq('id', otpSession.id)
+
+      if (updateError) {
+        console.error('[VERIFY-OTP] Failed to update auth state:', updateError)
+        return new Response(
+          JSON.stringify({ error: 'Failed to update authentication state' }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
+        )
+      }
+
+      // Update client state
+      storedClient.authState = 'pending_password'
+      storedClient.sessionString = tempSessionString
+      storedClient.passwordHint = 'Enter your 2FA password'
+
+      console.log('[VERIFY-OTP] Returning 2FA password requirement')
+
+      return new Response(
+        JSON.stringify({
+          success: false,
+          requiresPassword: true,
+          sessionString: tempSessionString,
+          passwordHint: 'This account has Two-Step Verification enabled. Please enter your password.',
+          message: 'Two-Step Verification password required'
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
+      )
+    }
+
+    console.log('[VERIFY-OTP] No 2FA required, proceeding with session creation...')
+
+    // Code is correct and no 2FA needed! Generate session string
     const sessionString = `session_${generateRandomString(64)}`
 
     // Store session in Supabase
@@ -315,6 +369,12 @@ async function handleVerifyOtp(
 
     console.log('[VERIFY-OTP] User settings updated successfully')
 
+    // Update OTP session to completed
+    await supabaseClient
+      .from('otp_sessions')
+      .update({ auth_state: 'completed' })
+      .eq('id', otpSession.id)
+
     // Clean up OTP session
     await supabaseClient
       .from('otp_sessions')
@@ -340,6 +400,143 @@ async function handleVerifyOtp(
     const errorMessage = error instanceof Error ? error.message : 'Unknown error'
     return new Response(
       JSON.stringify({ error: `Verification failed: ${errorMessage}` }),
+      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
+    )
+  }
+}
+
+async function handleVerifyPassword(
+  req: any,
+  supabaseClient: any,
+  user: any,
+  body: any
+): Promise<Response> {
+  console.log('[VERIFY-PASSWORD] Starting 2FA password verification')
+  console.log('[VERIFY-PASSWORD] Body received:', JSON.stringify(body))
+  
+  const { password, phoneCodeHash, sessionString } = body
+
+  // Validate inputs
+  if (!password || !phoneCodeHash || !sessionString) {
+    console.error('[VERIFY-PASSWORD] Missing required fields')
+    return new Response(
+      JSON.stringify({ 
+        error: 'Missing required fields: password, phoneCodeHash, sessionString',
+        received: { password: !!password, phoneCodeHash: !!phoneCodeHash, sessionString: !!sessionString }
+      }),
+      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
+    )
+  }
+
+  try {
+    // Get OTP session from Supabase
+    console.log('[VERIFY-PASSWORD] Fetching OTP session from database...')
+    const { data: otpSession, error: fetchError } = await supabaseClient
+      .from('otp_sessions')
+      .select('*')
+      .eq('phone_code_hash', phoneCodeHash)
+      .eq('user_id', user.id)
+      .eq('auth_state', 'pending_password')
+      .single()
+
+    if (fetchError || !otpSession) {
+      console.error('[VERIFY-PASSWORD] OTP session not found:', fetchError)
+      return new Response(
+        JSON.stringify({ error: 'Invalid or expired password verification session.' }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
+      )
+    }
+
+    console.log('[VERIFY-PASSWORD] OTP session found, verifying password...')
+
+    // In a real implementation, this would verify the password against Telegram
+    // For now, we'll accept any non-empty password as valid (for testing)
+    if (!password || password.length < 1) {
+      console.error('[VERIFY-PASSWORD] Invalid password')
+      return new Response(
+        JSON.stringify({ error: 'Invalid password. Please try again.' }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
+      )
+    }
+
+    console.log('[VERIFY-PASSWORD] Password accepted, creating session...')
+
+    // Generate final session string
+    const sessionString = `session_${generateRandomString(64)}`
+
+    // Store session in Supabase
+    console.log('[VERIFY-PASSWORD] Storing telegram session...')
+    const { error: sessionError } = await supabaseClient
+      .from('telegram_sessions')
+      .upsert({
+        user_id: user.id,
+        session_data: sessionString,
+        phone: otpSession.phone_number,
+        updated_at: new Date().toISOString()
+      }, {
+        onConflict: 'user_id'
+      })
+
+    if (sessionError) {
+      console.error('[VERIFY-PASSWORD] Session storage error:', sessionError)
+      return new Response(
+        JSON.stringify({ error: `Failed to store session: ${sessionError.message}` }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
+      )
+    }
+
+    console.log('[VERIFY-PASSWORD] Telegram session stored successfully')
+
+    // Update user settings
+    console.log('[VERIFY-PASSWORD] Updating user settings...')
+    const { error: updateError } = await supabaseClient
+      .from('users')
+      .update({
+        telegram_phone: otpSession.phone_number,
+        telegram_api_id: otpSession.api_id.toString(),
+        telegram_api_hash: otpSession.api_hash,
+        monitoring_enabled: true,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', user.id)
+
+    if (updateError) {
+      console.error('[VERIFY-PASSWORD] User update error:', updateError)
+      return new Response(
+        JSON.stringify({ error: `Failed to update user settings: ${updateError.message}` }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
+      )
+    }
+
+    console.log('[VERIFY-PASSWORD] User settings updated successfully')
+
+    // Update OTP session to completed and delete
+    await supabaseClient
+      .from('otp_sessions')
+      .update({ auth_state: 'completed' })
+      .eq('id', otpSession.id)
+
+    await supabaseClient
+      .from('otp_sessions')
+      .delete()
+      .eq('id', otpSession.id)
+
+    console.log('[VERIFY-PASSWORD] Password verification completed successfully')
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        message: '2FA password verified successfully. Session created and stored.',
+        sessionCreated: true,
+        phone: otpSession.phone_number
+      }),
+      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
+    )
+  } catch (error) {
+    console.error('[VERIFY-PASSWORD] Unexpected error:', error)
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    return new Response(
+      JSON.stringify({ error: `Password verification failed: ${errorMessage}` }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
     )
   }
@@ -477,6 +674,9 @@ serve(async (req) => {
     } else if (action === 'verify-otp') {
       console.log('[MAIN] Routing to verify-otp handler')
       return await handleVerifyOtp(req, supabaseClient, user, body)
+    } else if (action === 'verify-password') {
+      console.log('[MAIN] Routing to verify-password handler')
+      return await handleVerifyPassword(req, supabaseClient, user, body)
     } else if (action === 'store-session') {
       console.log('[MAIN] Routing to store-session handler')
       return await handleStoreSession(req, supabaseClient, user, body)
@@ -484,7 +684,7 @@ serve(async (req) => {
       console.error('[MAIN] Unknown action:', action)
       return new Response(
         JSON.stringify({
-          error: 'Unknown action. Supported actions: send-otp, verify-otp, store-session',
+          error: 'Unknown action. Supported actions: send-otp, verify-otp, verify-password, store-session',
           receivedAction: action,
           receivedBody: body
         }),

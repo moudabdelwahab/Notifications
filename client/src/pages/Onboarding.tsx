@@ -8,7 +8,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { Loader2, ExternalLink, CheckCircle2, AlertCircle, Phone, Lock, Key } from 'lucide-react';
 import { toast } from 'sonner';
 
-type OnboardingStep = 'welcome' | 'telegram-setup' | 'credentials' | 'phone-input' | 'otp-verify' | 'complete';
+type OnboardingStep = 'welcome' | 'telegram-setup' | 'credentials' | 'phone-input' | 'otp-verify' | 'password-verify' | 'complete';
 
 export default function Onboarding() {
   const { user, loading: authLoading } = useAuth();
@@ -18,11 +18,14 @@ export default function Onboarding() {
   const [apiHash, setApiHash] = useState('');
   const [phone, setPhone] = useState('');
   const [otp, setOtp] = useState('');
+  const [password, setPassword] = useState('');
   const [phoneCodeHash, setPhoneCodeHash] = useState('');
   const [sessionId, setSessionId] = useState('');
+  const [sessionString, setSessionString] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [otpSent, setOtpSent] = useState(false);
+  const [passwordHint, setPasswordHint] = useState<string | null>(null);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -186,7 +189,14 @@ export default function Onboarding() {
         throw new Error(data.error);
       }
 
-      if (data?.success) {
+      // Check if 2FA password is required
+      if (data?.requiresPassword) {
+        console.log('[ONBOARDING] 2FA password required');
+        setSessionString(data.sessionString);
+        setPasswordHint(data.passwordHint || 'أدخل كلمة المرور الخاصة بك');
+        toast.info('يتطلب حسابك التحقق بخطوتين. يرجى إدخال كلمة المرور.');
+        setStep('password-verify');
+      } else if (data?.success) {
         toast.success('تم التحقق بنجاح وإنشاء الجلسة');
         setStep('complete');
       } else {
@@ -202,16 +212,71 @@ export default function Onboarding() {
     }
   };
 
+  const handleVerifyPassword = async () => {
+    if (!password.trim()) {
+      setError('يرجى إدخال كلمة المرور');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError(null);
+
+      const { data, error: verifyError } = await supabase.functions.invoke('telegram-auth', {
+        body: {
+          action: 'verify-password',
+          password: password.trim(),
+          phoneCodeHash: phoneCodeHash,
+          sessionString: sessionString
+        }
+      });
+
+      if (verifyError) {
+        console.error('Password Verify Error:', verifyError);
+        let errorMsg = 'فشل التحقق من كلمة المرور';
+        if (verifyError.message) {
+          errorMsg = verifyError.message;
+        } else if (verifyError.error?.message) {
+          errorMsg = verifyError.error.message;
+        } else if (typeof verifyError === 'string') {
+          errorMsg = verifyError;
+        }
+        throw new Error(errorMsg);
+      }
+
+      if (data?.error) {
+        throw new Error(data.error);
+      }
+
+      if (data?.success) {
+        toast.success('تم التحقق من كلمة المرور بنجاح وإنشاء الجلسة');
+        setStep('complete');
+      } else {
+        throw new Error('فشل التحقق من كلمة المرور');
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'كلمة المرور غير صحيحة';
+      setError(message);
+      toast.error(message);
+      console.error('Verify password error:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleComplete = () => {
     setLocation('/dashboard');
   };
 
   const handleResendOTP = () => {
     setOtp('');
+    setPassword('');
     setError(null);
     setOtpSent(false);
     setSessionId('');
+    setSessionString('');
     setPhoneCodeHash('');
+    setPasswordHint(null);
     setStep('phone-input');
   };
 
@@ -230,21 +295,21 @@ export default function Onboarding() {
 
         {/* Progress indicator */}
         <div className="flex justify-between mb-12 overflow-x-auto">
-          {(['welcome', 'telegram-setup', 'credentials', 'phone-input', 'otp-verify', 'complete'] as const).map((s, i) => (
+          {(['welcome', 'telegram-setup', 'credentials', 'phone-input', 'otp-verify', 'password-verify', 'complete'] as const).map((s, i) => (
             <div key={s} className="flex-1 flex items-center min-w-max">
               <div
                 className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold transition-all ${
-                  step === s || (step === 'complete' && i < 5) || (i < ['welcome', 'telegram-setup', 'credentials', 'phone-input', 'otp-verify', 'complete'].indexOf(step))
+                  step === s || (step === 'complete' && i < 6) || (i < ['welcome', 'telegram-setup', 'credentials', 'phone-input', 'otp-verify', 'password-verify', 'complete'].indexOf(step))
                     ? 'bg-blue-600 text-white'
                     : 'bg-gray-200 text-gray-600'
                 }`}
               >
                 {i + 1}
               </div>
-              {i < 5 && (
+              {i < 6 && (
                 <div
                   className={`flex-1 h-1 mx-1 transition-all min-w-[20px] ${
-                    (step === 'complete' || i < ['welcome', 'telegram-setup', 'credentials', 'phone-input', 'otp-verify', 'complete'].indexOf(step))
+                    (step === 'complete' || i < ['welcome', 'telegram-setup', 'credentials', 'phone-input', 'otp-verify', 'password-verify', 'complete'].indexOf(step))
                       ? 'bg-blue-600'
                       : 'bg-gray-200'
                   }`}
@@ -602,6 +667,74 @@ export default function Onboarding() {
                     </>
                   ) : (
                     'تحقق وتأكيد'
+                  )}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {step === 'password-verify' && (
+            <div className="space-y-6">
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900 mb-2 font-display">
+                  التحقق بخطوتين
+                </h2>
+                <p className="text-gray-600 mb-4">
+                  حسابك محمي بكلمة مرور إضافية. يرجى إدخال كلمة المرور للمتابعة.
+                </p>
+              </div>
+
+              {error && (
+                <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex gap-3">
+                  <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+                  <p className="text-sm text-red-900">{error}</p>
+                </div>
+              )}
+
+              {passwordHint && (
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+                  <p className="text-sm text-blue-900">
+                    <strong>تلميح:</strong> {passwordHint}
+                  </p>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-900 mb-2 flex items-center gap-2">
+                  <Lock className="w-4 h-4" />
+                  كلمة المرور
+                </label>
+                <Input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="أدخل كلمة المرور"
+                  className="h-12 rounded-xl border-gray-300"
+                  disabled={loading}
+                />
+              </div>
+
+              <div className="flex gap-3">
+                <Button
+                  onClick={handleResendOTP}
+                  variant="outline"
+                  className="flex-1 h-12 rounded-xl"
+                  disabled={loading}
+                >
+                  رجوع
+                </Button>
+                <Button
+                  onClick={handleVerifyPassword}
+                  disabled={loading || !password.trim()}
+                  className="flex-1 h-12 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl flex items-center justify-center gap-2"
+                >
+                  {loading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      جاري التحقق...
+                    </>
+                  ) : (
+                    'تحقق من كلمة المرور'
                   )}
                 </Button>
               </div>
