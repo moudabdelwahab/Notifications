@@ -19,6 +19,7 @@ export default function Onboarding() {
   const [phone, setPhone] = useState('');
   const [otp, setOtp] = useState('');
   const [phoneCodeHash, setPhoneCodeHash] = useState('');
+  const [sessionId, setSessionId] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [otpSent, setOtpSent] = useState(false);
@@ -129,13 +130,14 @@ export default function Onboarding() {
         throw new Error(data.error);
       }
 
-      if (data?.phoneCodeHash) {
+      if (data?.phoneCodeHash && data?.sessionId) {
         setPhoneCodeHash(data.phoneCodeHash);
+        setSessionId(data.sessionId);
         setOtpSent(true);
         toast.success('تم إرسال رمز التحقق إلى حسابك في Telegram');
         setStep('otp-verify');
       } else {
-        throw new Error('فشل في إرسال رمز التحقق: لم يتم استلام phoneCodeHash');
+        throw new Error('فشل في إرسال رمز التحقق: لم يتم استلام phoneCodeHash أو sessionId');
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'خطأ في إرسال الرمز';
@@ -160,11 +162,9 @@ export default function Onboarding() {
       const { data, error: verifyError } = await supabase.functions.invoke('telegram-auth', {
         body: {
           action: 'verify-otp',
-          phone: phone.trim(),
-          apiId: apiId.trim(),
-          apiHash: apiHash.trim(),
           code: otp.trim(),
-          phoneCodeHash: phoneCodeHash
+          phoneCodeHash: phoneCodeHash,
+          sessionId: sessionId
         }
       });
 
@@ -210,6 +210,8 @@ export default function Onboarding() {
     setOtp('');
     setError(null);
     setOtpSent(false);
+    setSessionId('');
+    setPhoneCodeHash('');
     setStep('phone-input');
   };
 
