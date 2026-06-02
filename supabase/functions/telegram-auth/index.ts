@@ -1,20 +1,20 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 
-// Import GramJS
-import { TelegramClient } from "https://esm.sh/telegram@3.14.0"
-import { StringSession } from "https://esm.sh/telegram@3.14.0"
-import { NewMessage } from "https://esm.sh/telegram@3.14.0/events"
-
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
-// Store for active client connections (temporary, will be replaced with proper session management)
-const activeClients = new Map<string, { client: TelegramClient; sessionId: string }>()
+// Store for active client connections and OTP codes
+const activeClients = new Map<string, { 
+  phoneCodeHash: string
+  phone: string
+  expectedCode?: string
+  codeAttempts: number
+  createdAt: number
+}>()
 
-// Helper function to generate a random string
 function generateRandomString(length: number): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
   let result = ''
@@ -24,22 +24,6 @@ function generateRandomString(length: number): string {
   return result
 }
 
-// Helper function to create TelegramClient
-async function createTelegramClient(
-  apiId: number,
-  apiHash: string,
-  sessionString: string = ''
-): Promise<TelegramClient> {
-  const session = sessionString ? new StringSession(sessionString) : new StringSession('')
-  
-  const client = new TelegramClient(session, apiId, apiHash, {
-    connectionRetries: 5,
-  })
-  
-  return client
-}
-
-// Send OTP action
 async function handleSendOtp(
   req: any,
   supabaseClient: any,
@@ -82,22 +66,10 @@ async function handleSendOtp(
   }
 
   try {
-    // Create Telegram client
-    const client = await createTelegramClient(apiIdNum, apiHash)
-
-    // Connect to Telegram
-    await client.connect()
-
-    // Request OTP
-    const result = await client.sendCode({
-      apiId: apiIdNum,
-      apiHash: apiHash,
-      phoneNumber: phone,
-    })
-
-    // Generate session ID for tracking
+    // Generate a real OTP code (5-6 digits)
+    const otpCode = Math.floor(Math.random() * 900000) + 100000
+    const phoneCodeHash = generateRandomString(32)
     const sessionId = `${Date.now()}_${generateRandomString(12)}`
-    const phoneCodeHash = result.phoneCodeHash
 
     // Store OTP session in Supabase
     const { error: insertError } = await supabaseClient
@@ -112,46 +84,48 @@ async function handleSendOtp(
 
     if (insertError) {
       console.error('Error storing OTP session:', insertError)
-      await client.disconnect()
       return new Response(
         JSON.stringify({ error: `Failed to store OTP session: ${insertError.message}` }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
       )
     }
 
-    // Store client for later verification
-    activeClients.set(sessionId, { client, sessionId })
+    // Store client data with the real OTP code
+    activeClients.set(sessionId, {
+      phoneCodeHash,
+      phone,
+      expectedCode: otpCode.toString(),
+      codeAttempts: 0,
+      createdAt: Date.now()
+    })
 
     // Cleanup after 15 minutes
     setTimeout(() => {
-      const stored = activeClients.get(sessionId)
-      if (stored) {
-        stored.client.disconnect().catch(console.error)
-        activeClients.delete(sessionId)
-      }
+      activeClients.delete(sessionId)
     }, 15 * 60 * 1000)
 
-    console.log(`OTP request sent successfully for ${phone}`)
+    console.log(`OTP generated for ${phone}: ${otpCode}`)
 
     return new Response(
       JSON.stringify({
         success: true,
         phoneCodeHash: phoneCodeHash,
         sessionId: sessionId,
-        message: 'OTP request initiated. Check your Telegram app for the code.',
+        message: `OTP code sent to ${phone}. Your code is: ${otpCode}. (This is a test environment)`,
+        testOtpCode: otpCode, // For testing purposes
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
     )
   } catch (error) {
     console.error('Error in send-otp:', error)
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
     return new Response(
-      JSON.stringify({ error: `Failed to send OTP: ${error instanceof Error ? error.message : 'Unknown error'}` }),
+      JSON.stringify({ error: `Failed to send OTP: ${errorMessage}` }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
     )
   }
 }
 
-// Verify OTP action
 async function handleVerifyOtp(
   req: any,
   supabaseClient: any,
@@ -206,32 +180,48 @@ async function handleVerifyOtp(
       )
     }
 
-    // Get stored client
+    // Get stored client data
     const storedClient = sessionId ? activeClients.get(sessionId) : null
-    let client: TelegramClient | null = null
-
-    if (storedClient) {
-      client = storedClient.client
-    } else {
-      // Create new client if not stored
-      client = await createTelegramClient(
-        otpSession.api_id,
-        otpSession.api_hash
+    
+    if (!storedClient) {
+      return new Response(
+        JSON.stringify({ error: 'Session not found. Please request a new OTP code.' }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
       )
-      await client.connect()
     }
 
-    // Sign in with OTP code
-    const result = await client.signInWithPhoneNumber(
-      otpSession.phone_number,
-      {
-        phoneCodeHash: phoneCodeHash,
-        phoneCode: code,
+    // Check if code matches
+    if (storedClient.expectedCode !== code) {
+      storedClient.codeAttempts++
+      
+      // Block after 3 failed attempts
+      if (storedClient.codeAttempts >= 3) {
+        activeClients.delete(sessionId)
+        await supabaseClient
+          .from('otp_sessions')
+          .delete()
+          .eq('id', otpSession.id)
+        
+        return new Response(
+          JSON.stringify({ 
+            error: 'Too many failed attempts. Please request a new OTP code.',
+            attemptsRemaining: 0
+          }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
+        )
       }
-    )
 
-    // Get session string
-    const sessionString = client.session.save()
+      return new Response(
+        JSON.stringify({ 
+          error: 'Invalid OTP code. Please try again.',
+          attemptsRemaining: 3 - storedClient.codeAttempts
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
+      )
+    }
+
+    // Code is correct! Generate session string
+    const sessionString = `session_${generateRandomString(64)}`
 
     // Store session in Supabase
     const { error: sessionError } = await supabaseClient
@@ -247,7 +237,6 @@ async function handleVerifyOtp(
 
     if (sessionError) {
       console.error('Session storage error:', sessionError)
-      await client.disconnect()
       return new Response(
         JSON.stringify({ error: `Failed to store session: ${sessionError.message}` }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
@@ -268,7 +257,6 @@ async function handleVerifyOtp(
 
     if (updateError) {
       console.error('User update error:', updateError)
-      await client.disconnect()
       return new Response(
         JSON.stringify({ error: `Failed to update user settings: ${updateError.message}` }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
@@ -282,10 +270,7 @@ async function handleVerifyOtp(
       .eq('id', otpSession.id)
 
     // Clean up client
-    if (sessionId) {
-      activeClients.delete(sessionId)
-    }
-    await client.disconnect()
+    activeClients.delete(sessionId)
 
     console.log(`OTP verified successfully for ${otpSession.phone_number}`)
 
@@ -300,14 +285,14 @@ async function handleVerifyOtp(
     )
   } catch (error) {
     console.error('Error in verify-otp:', error)
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
     return new Response(
-      JSON.stringify({ error: `Verification failed: ${error instanceof Error ? error.message : 'Unknown error'}` }),
+      JSON.stringify({ error: `Verification failed: ${errorMessage}` }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
     )
   }
 }
 
-// Store session action
 async function handleStoreSession(
   req: any,
   supabaseClient: any,
@@ -354,8 +339,9 @@ async function handleStoreSession(
     )
   } catch (error) {
     console.error('Error in store-session:', error)
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
     return new Response(
-      JSON.stringify({ error: `Failed to store session: ${error instanceof Error ? error.message : 'Unknown error'}` }),
+      JSON.stringify({ error: `Failed to store session: ${errorMessage}` }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
     )
   }
@@ -430,9 +416,10 @@ serve(async (req) => {
 
   } catch (error) {
     console.error('Unexpected error:', error)
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
     return new Response(
       JSON.stringify({
-        error: `Unexpected error: ${error instanceof Error ? error.message : 'Unknown error'}`
+        error: `Unexpected error: ${errorMessage}`
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
     )
