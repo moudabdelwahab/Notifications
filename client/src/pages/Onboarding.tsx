@@ -125,15 +125,17 @@ export default function Onboarding() {
         throw new Error(errorMsg);
       }
 
+      if (data?.error) {
+        throw new Error(data.error);
+      }
+
       if (data?.phoneCodeHash) {
         setPhoneCodeHash(data.phoneCodeHash);
         setOtpSent(true);
         toast.success('تم إرسال رمز التحقق إلى حسابك في Telegram');
         setStep('otp-verify');
-      } else if (data?.error) {
-        throw new Error(data.error);
       } else {
-        throw new Error('فشل في إرسال رمز التحقق');
+        throw new Error('فشل في إرسال رمز التحقق: لم يتم استلام phoneCodeHash');
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'خطأ في إرسال الرمز';
@@ -180,13 +182,15 @@ export default function Onboarding() {
         throw new Error(errorMsg);
       }
 
+      if (data?.error) {
+        throw new Error(data.error);
+      }
+
       if (data?.success) {
         toast.success('تم التحقق بنجاح وإنشاء الجلسة');
         setStep('complete');
-      } else if (data?.error) {
-        throw new Error(data.error);
       } else {
-        throw new Error('فشل التحقق من الرمز');
+        throw new Error('فشل التحقق من الرمز: لم يتم استلام حالة النجاح');
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'رمز التحقق غير صحيح';

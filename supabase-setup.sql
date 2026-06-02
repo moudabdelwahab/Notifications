@@ -27,6 +27,18 @@ CREATE TABLE IF NOT EXISTS public.notifications (
   read BOOLEAN DEFAULT FALSE
 );
 
+-- Create OTP sessions table
+CREATE TABLE IF NOT EXISTS public.otp_sessions (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  phone_number TEXT NOT NULL,
+  api_id INTEGER NOT NULL,
+  api_hash TEXT NOT NULL,
+  phone_code_hash TEXT NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(user_id, phone_number)
+);
+
 -- Create telegram_sessions table
 CREATE TABLE IF NOT EXISTS public.telegram_sessions (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -38,6 +50,8 @@ CREATE TABLE IF NOT EXISTS public.telegram_sessions (
 );
 
 -- Create indexes
+CREATE INDEX IF NOT EXISTS idx_otp_sessions_user_id ON public.otp_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_otp_sessions_created_at ON public.otp_sessions(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON public.notifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON public.notifications(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_read ON public.notifications(read);
@@ -46,6 +60,7 @@ CREATE INDEX IF NOT EXISTS idx_users_google_id ON public.users(google_id);
 
 -- Enable Row Level Security (RLS)
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.otp_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.notifications ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.telegram_sessions ENABLE ROW LEVEL SECURITY;
 
@@ -55,6 +70,16 @@ CREATE POLICY "Users can view their own data" ON public.users
 
 CREATE POLICY "Users can update their own data" ON public.users
   FOR UPDATE USING (auth.uid() = id);
+
+-- Create RLS policies for otp_sessions table
+CREATE POLICY "Users can view their own OTP sessions" ON public.otp_sessions
+  FOR SELECT USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert their own OTP sessions" ON public.otp_sessions
+  FOR INSERT WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete their own OTP sessions" ON public.otp_sessions
+  FOR DELETE USING (auth.uid() = user_id);
 
 -- Create RLS policies for notifications table
 CREATE POLICY "Users can view their own notifications" ON public.notifications
@@ -93,5 +118,6 @@ CREATE TRIGGER on_auth_user_created
 -- Grant permissions
 GRANT USAGE ON SCHEMA public TO authenticated;
 GRANT ALL ON public.users TO authenticated;
+GRANT ALL ON public.otp_sessions TO authenticated;
 GRANT ALL ON public.notifications TO authenticated;
 GRANT ALL ON public.telegram_sessions TO authenticated;
