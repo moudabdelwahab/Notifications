@@ -5,7 +5,8 @@ import { useOnboardingStatus } from '@/hooks/useOnboardingStatus';
 import { supabase } from '@/lib/supabase';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Loader2, ArrowRight, CheckCircle2, AlertCircle } from 'lucide-react';
+import AutoReplyPanel from '@/components/AutoReplyPanel';
+import { Loader2, ArrowRight, CheckCircle2, AlertCircle, MessageSquareReply } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface UserSettings {
@@ -278,6 +279,15 @@ export default function Settings() {
               </Button>
             </div>
           </div>
+        </div>
+
+        {/* Scheduled auto-replies */}
+        <div className="mt-8 bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
+          <h2 className="text-xl font-bold text-gray-900 mb-6 font-display flex items-center gap-2">
+            <MessageSquareReply className="w-5 h-5 text-blue-600" />
+            الرد الآلي المجدول
+          </h2>
+          <AutoReplyPanel userId={user?.id} />
         </div>
 
         {/* Help Section */}
