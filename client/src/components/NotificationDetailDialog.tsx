@@ -26,6 +26,7 @@ export interface NotificationDetail {
   sender_name: string;
   chat_title: string | null;
   chat_type: 'group' | 'channel' | 'private' | null;
+  chat_username: string | null;
   created_at: string;
 }
 
@@ -36,15 +37,15 @@ const CHAT_KIND = {
 } as const;
 
 /**
- * Derives a link to the chat from the message link.
+ * Link that opens the chat itself.
  *
- * `https://t.me/c/<chat>/<msg>` → `https://t.me/c/<chat>` — the private-chat
- * form Telegram uses for groups and channels you are a member of.
+ * Only public chats can be linked: t.me/<username> resolves, while the
+ * t.me/c/<internal_id> form does NOT — without a message id Telegram does not
+ * recognise the path and redirects to telegram.org. Private groups therefore
+ * get no chat-level link, and the message link is used to reach them instead.
  */
-function chatLinkFrom(messageLink: string | null): string | null {
-  if (!messageLink) return null;
-  const match = messageLink.match(/^(https:\/\/t\.me\/c\/\d+)\/\d+$/);
-  return match ? match[1] : null;
+function chatLinkFor(username: string | null): string | null {
+  return username ? `https://t.me/${username}` : null;
 }
 
 function formatDate(iso: string): string {
@@ -70,7 +71,7 @@ export default function NotificationDetailDialog({
   const isMention = notification.type === 'mention';
   const kind = notification.chat_type ? CHAT_KIND[notification.chat_type] : null;
   const KindIcon = kind?.Icon ?? Hash;
-  const chatLink = chatLinkFrom(notification.message_link);
+  const chatLink = chatLinkFor(notification.chat_username);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -141,6 +142,9 @@ export default function NotificationDetailDialog({
                   <ExternalLink className="w-4 h-4" />
                 </Button>
               </a>
+              <p className="text-xs text-gray-500 text-center">
+                يفتح المحادثة عند هذه الرسالة تحديداً
+              </p>
 
               {chatLink && (
                 <a href={chatLink} target="_blank" rel="noopener noreferrer" className="block">

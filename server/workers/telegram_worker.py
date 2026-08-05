@@ -139,6 +139,7 @@ async def process_user(user_id, api_id, api_hash, session_str, last_scanned_at) 
                         "chat_id": str(d.id),
                         "chat_title": d.name or None,
                         "chat_type": chat_kind(d),
+                        "chat_username": getattr(d.entity, "username", None),
                     }
                     for d in dialogs
                 ],
@@ -205,6 +206,7 @@ async def process_user(user_id, api_id, api_hash, session_str, last_scanned_at) 
                     "sender_name": sender_name,
                     "chat_title": dialog.name or None,
                     "chat_type": chat_kind(dialog),
+                    "chat_username": getattr(dialog.entity, "username", None),
                     "created_at": message.date.isoformat(),
                 }
 
