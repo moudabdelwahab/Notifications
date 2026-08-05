@@ -365,16 +365,14 @@ async def process_user(user_id, api_id, api_hash, session_str, last_scanned_at) 
 async def main() -> int:
     response = (
         supabase.table("telegram_sessions")
-        .select(
-            "user_id, session_data, last_scanned_at, "
-            "users(telegram_api_id, telegram_api_hash, monitoring_enabled)"
-        )
+        .select("user_id, last_scanned_at, users(monitoring_enabled)")
         .execute()
     )
 
     tasks = []
     skipped = 0
     for session in response.data or []:
+        user_id = session["user_id"]
         settings = session.get("users") or {}
         if isinstance(settings, list):  # PostgREST returns a list for some embeds
             settings = settings[0] if settings else {}
@@ -383,22 +381,21 @@ async def main() -> int:
             skipped += 1
             continue
 
-        api_id_raw = settings.get("telegram_api_id")
-        api_hash = settings.get("telegram_api_hash")
-        if not api_id_raw or not api_hash:
-            print(
-                f"[{session['user_id']}] SKIP: missing telegram_api_id/telegram_api_hash",
-                file=sys.stderr,
-            )
+        # The session string and api_hash live in Vault; this RPC is the only way
+        # to read them back, and it is granted to service_role alone.
+        creds_rows = supabase.rpc("get_telegram_credentials", {"p_user_id": user_id}).execute().data
+        creds = (creds_rows or [None])[0]
+        if not creds or not creds.get("session_data") or not creds.get("api_id") or not creds.get("api_hash"):
+            print(f"[{user_id}] SKIP: stored credentials are incomplete", file=sys.stderr)
             skipped += 1
             continue
 
         tasks.append(
             process_user(
-                session["user_id"],
-                int(api_id_raw),
-                api_hash,
-                session["session_data"],
+                user_id,
+                int(creds["api_id"]),
+                creds["api_hash"],
+                creds["session_data"],
                 session.get("last_scanned_at"),
             )
         )
