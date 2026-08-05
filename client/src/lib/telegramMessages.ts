@@ -46,15 +46,54 @@ export const MAX_MESSAGE_LENGTH = 4096;
  * observed in practice — so a retry without a stable key would deliver the
  * message twice.
  */
+export interface Attachment {
+  name: string;
+  dataBase64: string;
+}
+
+/** Matches the cap enforced by the edge function. */
+export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+
 export function sendMessage(
   chatId: string,
   text: string,
   dedupeKey: string,
+  options: { replyTo?: number | null; attachment?: Attachment | null } = {},
 ): Promise<{ message: TelegramMessage; deduplicated?: boolean }> {
   return callEdgeFunction('telegram-messages', {
     action: 'send-message',
     chatId,
     text,
     dedupeKey,
+    replyTo: options.replyTo ?? undefined,
+    attachment: options.attachment ?? undefined,
+  });
+}
+
+/** Clears the chat's unread badge in Telegram itself, not just locally. */
+export function readHistory(chatId: string): Promise<{ ok: true }> {
+  return callEdgeFunction('telegram-messages', { action: 'read-history', chatId });
+}
+
+/**
+ * Reads a File into the base64 payload the edge function expects.
+ *
+ * `readAsDataURL` yields `data:<mime>;base64,<data>` — only the part after the
+ * comma is the payload.
+ */
+export function fileToAttachment(file: File): Promise<Attachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('تعذر قراءة الملف'));
+    reader.onload = () => {
+      const result = String(reader.result ?? '');
+      const comma = result.indexOf(',');
+      if (comma < 0) {
+        reject(new Error('تعذر قراءة الملف'));
+        return;
+      }
+      resolve({ name: file.name, dataBase64: result.slice(comma + 1) });
+    };
+    reader.readAsDataURL(file);
   });
 }

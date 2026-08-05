@@ -6,7 +6,11 @@ import {
   getMessages,
   listChats,
   sendMessage,
+  readHistory,
+  fileToAttachment,
   MAX_MESSAGE_LENGTH,
+  MAX_ATTACHMENT_BYTES,
+  type Attachment,
   type TelegramChat,
   type TelegramMessage,
 } from '@/lib/telegramMessages';
@@ -22,6 +26,9 @@ import {
   ExternalLink,
   AlertTriangle,
   Send,
+  CornerUpLeft,
+  X,
+  Image as ImageIcon,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -58,8 +65,14 @@ export default function ConversationsPanel() {
   const [messagesError, setMessagesError] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  const [replyTo, setReplyTo] = useState<TelegramMessage | null>(null);
+  const [attachment, setAttachment] = useState<{ file: File; payload: Attachment } | null>(null);
   const threadRef = useRef<HTMLDivElement>(null);
   const retryKeyRef = useRef<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const activeChatIdRef = useRef<string | null>(null);
+  // Read inside the polling interval, which closes over a stale `sending`.
+  const sendingRef = useRef(false);
 
   const loadChats = async () => {
     setLoadingChats(true);
@@ -87,9 +100,66 @@ export default function ConversationsPanel() {
     });
   };
 
+  const clearAttachment = () => {
+    setAttachment(null);
+    // Reset the input's value too, so picking the same file again still fires.
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const pickAttachment = async (file: File | undefined) => {
+    if (!file) return;
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      const mb = Math.round(MAX_ATTACHMENT_BYTES / (1024 * 1024));
+      toast.error(`حجم الملف أكبر من الحد المسموح (${mb} ميجابايت)`);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+    try {
+      setAttachment({ file, payload: await fileToAttachment(file) });
+    } catch {
+      toast.error('تعذر قراءة الملف');
+      clearAttachment();
+    }
+  };
+
+  /**
+   * Refreshes the open thread in the background.
+   *
+   * Supabase Realtime cannot serve this: conversations are deliberately never
+   * written to the database, so there is no table to subscribe to. Polling the
+   * open chat is what removes the need to reopen it to see a reply.
+   */
+  useEffect(() => {
+    if (!activeChat) return;
+
+    const id = setInterval(() => {
+      // Skip while hidden or mid-send: a refresh would fight the optimistic
+      // append and make a just-sent message flicker.
+      if (document.hidden || sendingRef.current) return;
+
+      getMessages(activeChat.id)
+        .then(({ messages: fresh }) => {
+          // The chat may have been switched while the request was in flight.
+          if (activeChatIdRef.current !== activeChat.id) return;
+          setMessages((prev) => {
+            const newest = prev[prev.length - 1]?.id;
+            const freshNewest = fresh[fresh.length - 1]?.id;
+            if (newest === freshNewest && prev.length === fresh.length) return prev;
+            scrollToNewest();
+            return fresh;
+          });
+        })
+        .catch(() => {
+          // A dropped poll is not worth a toast; the next tick retries.
+        });
+    }, 15_000);
+
+    return () => clearInterval(id);
+  }, [activeChat]);
+
   const send = async () => {
     const text = draft.trim();
-    if (!activeChat || !text || sending) return;
+    if (!activeChat || (!text && !attachment) || sending) return;
 
     // Held across retries: the server uses it to recognise a repeat of the same
     // message and return the original result instead of sending a second copy.
@@ -97,18 +167,24 @@ export default function ConversationsPanel() {
     if (!retryKeyRef.current) retryKeyRef.current = crypto.randomUUID();
 
     setSending(true);
+    sendingRef.current = true;
     try {
-      const { message } = await sendMessage(activeChat.id, text, retryKeyRef.current);
+      const { message } = await sendMessage(activeChat.id, text, retryKeyRef.current, {
+        replyTo: replyTo?.id ?? null,
+        attachment: attachment?.payload ?? null,
+      });
       retryKeyRef.current = null;
       setMessages((prev) => [...prev, message]);
       setDraft('');
+      setReplyTo(null);
+      clearAttachment();
       scrollToNewest();
 
       // Keep the chat list's preview and ordering honest without a full reload.
       setChats((prev) =>
         prev.map((c) =>
           c.id === activeChat.id
-            ? { ...c, lastMessage: { text, date: message.date, outgoing: true } }
+            ? { ...c, lastMessage: { text: message.text, date: message.date, outgoing: true } }
             : c,
         ),
       );
@@ -125,6 +201,7 @@ export default function ConversationsPanel() {
       );
     } finally {
       setSending(false);
+      sendingRef.current = false;
     }
   };
 
@@ -133,13 +210,30 @@ export default function ConversationsPanel() {
     setMessages([]);
     setMessagesError(null);
     setDraft('');
+    setReplyTo(null);
+    clearAttachment();
     retryKeyRef.current = null;
+    activeChatIdRef.current = chat.id;
     setLoadingMessages(true);
     try {
       const { messages } = await getMessages(chat.id);
       setMessages(messages);
       // Land at the newest message, the way a chat app does.
       scrollToNewest();
+
+      // Opening a chat marks it read in Telegram itself, so the badge here and
+      // the badge on the user's phone cannot drift apart.
+      if (chat.unreadCount > 0) {
+        readHistory(chat.id)
+          .then(() =>
+            setChats((prev) =>
+              prev.map((c) => (c.id === chat.id ? { ...c, unreadCount: 0 } : c)),
+            ),
+          )
+          .catch(() => {
+            // Failing to clear the badge must not look like the chat failed to open.
+          });
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'تعذر تحميل الرسائل';
       setMessagesError(message);
@@ -348,6 +442,8 @@ export default function ConversationsPanel() {
                   {messages.map((message) => (
                     <div
                       key={message.id}
+                      onDoubleClick={() => setReplyTo(message)}
+                      title="نقرتان للرد على هذه الرسالة"
                       className={`flex ${message.outgoing ? 'justify-start' : 'justify-end'}`}
                     >
                       <div
@@ -393,7 +489,63 @@ export default function ConversationsPanel() {
                   </p>
                 ) : (
                   <>
+                    {replyTo && (
+                      <div className="flex items-start gap-2 mb-2 bg-blue-50 border border-blue-200 rounded-xl p-2">
+                        <CornerUpLeft className="w-4 h-4 text-blue-600 flex-shrink-0 mt-0.5" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-semibold text-blue-800">
+                            رد على {replyTo.senderName}
+                          </p>
+                          <p className="text-xs text-gray-600 truncate">
+                            {replyTo.text || '[مرفق]'}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => setReplyTo(null)}
+                          className="text-gray-400 hover:text-gray-700 flex-shrink-0"
+                          title="إلغاء الرد"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    )}
+
+                    {attachment && (
+                      <div className="flex items-center gap-2 mb-2 bg-gray-50 border border-gray-200 rounded-xl p-2">
+                        <ImageIcon className="w-4 h-4 text-gray-500 flex-shrink-0" />
+                        <p className="flex-1 min-w-0 truncate text-xs text-gray-700">
+                          {attachment.file.name}
+                          <span className="text-gray-400">
+                            {' '}
+                            ({Math.max(1, Math.round(attachment.file.size / 1024))} كيلوبايت)
+                          </span>
+                        </p>
+                        <button
+                          onClick={clearAttachment}
+                          className="text-gray-400 hover:text-red-600 flex-shrink-0"
+                          title="إزالة المرفق"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    )}
+
                     <div className="flex items-end gap-2">
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        className="hidden"
+                        onChange={(e) => void pickAttachment(e.target.files?.[0])}
+                      />
+                      <Button
+                        onClick={() => fileInputRef.current?.click()}
+                        variant="outline"
+                        disabled={sending}
+                        className="h-11 w-11 p-0 rounded-xl flex-shrink-0"
+                        title="إرفاق صورة أو ملف"
+                      >
+                        <Paperclip className="w-4 h-4" />
+                      </Button>
                       <Textarea
                         value={draft}
                         onChange={(e) => setDraft(e.target.value.slice(0, MAX_MESSAGE_LENGTH))}
@@ -412,7 +564,7 @@ export default function ConversationsPanel() {
                       />
                       <Button
                         onClick={send}
-                        disabled={sending || !draft.trim()}
+                        disabled={sending || (!draft.trim() && !attachment)}
                         className="h-11 w-11 p-0 bg-blue-600 hover:bg-blue-700 text-white rounded-xl flex-shrink-0"
                         title="إرسال"
                       >

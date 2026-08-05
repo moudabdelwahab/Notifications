@@ -2,9 +2,11 @@
  * telegram-messages — reads chats and their recent history, and sends messages.
  *
  * Actions:
- *   list-chats    {}                            -> { chats: [...] }
- *   get-messages  { chatId, limit? }            -> { messages: [...] }
- *   send-message  { chatId, text }              -> { message: {...} }
+ *   list-chats    {}                                    -> { chats: [...] }
+ *   get-messages  { chatId, limit? }                    -> { messages: [...] }
+ *   send-message  { chatId, text, dedupeKey?, replyTo?, -> { message: {...} }
+ *                   attachment? { name, dataBase64 } }
+ *   read-history  { chatId }                            -> { ok: true }
  *
  * Conversations are never stored. Each call opens a short-lived MTProto
  * connection using the user's Vault-held session, acts, and disconnects — so the
@@ -19,6 +21,7 @@
 import { TelegramClient } from 'jsr:@mtcute/web@0.31.0'
 import { MemoryStorage } from 'jsr:@mtcute/core@0.31.0'
 import { convertFromTelethonSession } from 'jsr:@mtcute/convert@0.31.0'
+import { decodeBase64 } from 'jsr:@std/encoding@1/base64'
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
 const corsHeaders = {
@@ -33,6 +36,13 @@ const MAX_MESSAGE_LIMIT = 100
 
 /** Telegram rejects anything longer outright. */
 const MAX_TEXT_LENGTH = 4096
+/** A caption on a media message is capped lower than a plain message. */
+const MAX_CAPTION_LENGTH = 1024
+/**
+ * Attachments travel as base64 inside the JSON body, so the whole file is held
+ * in memory twice. Kept modest on purpose — this is not a file-transfer service.
+ */
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
 /** Deliberately well under Telegram's own limits — this is a human typing. */
 const SEND_LIMIT_PER_MINUTE = 10
 const SEND_LIMIT_PER_HOUR = 100
@@ -255,15 +265,40 @@ async function handleSendMessage(
   const chatIdRaw = String(body.chatId ?? '').trim()
   const text = String(body.text ?? '').trim()
   const dedupeKey = String(body.dedupeKey ?? '').trim() || null
+  const replyToRaw = body.replyTo
+  const attachment = body.attachment as
+    | { name?: string; dataBase64?: string }
+    | undefined
 
   if (!chatIdRaw) return json({ error: 'chatId مطلوب' }, 400)
-  if (!text) return json({ error: 'لا يمكن إرسال رسالة فارغة' }, 400)
-  if (text.length > MAX_TEXT_LENGTH) {
-    return json({ error: `الرسالة أطول من الحد المسموح (${MAX_TEXT_LENGTH} حرف)` }, 400)
+
+  const hasAttachment = Boolean(attachment?.dataBase64)
+  // With an attachment the text becomes a caption, so an empty one is fine.
+  if (!text && !hasAttachment) return json({ error: 'لا يمكن إرسال رسالة فارغة' }, 400)
+
+  const textCap = hasAttachment ? MAX_CAPTION_LENGTH : MAX_TEXT_LENGTH
+  if (text.length > textCap) {
+    return json({ error: `النص أطول من الحد المسموح (${textCap} حرف)` }, 400)
   }
 
   const chatId = Number(chatIdRaw)
   if (!Number.isFinite(chatId)) return json({ error: 'chatId غير صالح' }, 400)
+
+  const replyTo = Number(replyToRaw)
+  const replyToId = Number.isFinite(replyTo) && replyTo > 0 ? replyTo : null
+
+  let fileBytes: Uint8Array | null = null
+  if (hasAttachment) {
+    try {
+      fileBytes = decodeBase64(attachment!.dataBase64!)
+    } catch {
+      return json({ error: 'تعذر قراءة الملف المرفق' }, 400)
+    }
+    if (fileBytes.byteLength > MAX_ATTACHMENT_BYTES) {
+      const mb = Math.round(MAX_ATTACHMENT_BYTES / (1024 * 1024))
+      return json({ error: `حجم الملف أكبر من الحد المسموح (${mb} ميجابايت)` }, 400)
+    }
+  }
 
   // A send can succeed at Telegram and still fail to reach the browser, so the
   // user's retry must not become a second message. Same key, same answer.
@@ -300,7 +335,26 @@ async function handleSendMessage(
   if (limit.blocked) return json({ error: limit.message }, 429)
 
   const peer = await client.resolvePeer(chatId)
-  const sent: any = await client.sendText(peer, text)
+
+  // replyTo comes from mtcute's CommonSendParams and is shared by both send
+  // methods, so a reply works with or without an attachment.
+  const params: Record<string, unknown> = {}
+  if (replyToId) params.replyTo = replyToId
+
+  const sent: any = fileBytes
+    ? await client.sendMedia(
+        peer,
+        {
+          // 'auto' lets mtcute decide photo vs document from the content, so an
+          // image arrives as a viewable photo rather than a file attachment.
+          type: 'auto',
+          file: fileBytes,
+          fileName: attachment?.name || 'file',
+          caption: text || undefined,
+        } as any,
+        params as any,
+      )
+    : await client.sendText(peer, text, params as any)
 
   // Logged after the send so a failed attempt does not consume the user's quota.
   const { error: logError } = await supabase.from('sent_messages_log').insert({
@@ -320,18 +374,36 @@ async function handleSendMessage(
   return json({
     message: {
       id: sent?.id ?? null,
-      text,
+      text: text || summarise(sent),
       date: sent?.date?.toISOString?.() ?? new Date().toISOString(),
       outgoing: true,
       senderName: 'أنت',
       senderId: null,
-      hasMedia: false,
-      mediaType: null,
+      hasMedia: Boolean(fileBytes),
+      mediaType: sent?.media?.type ?? null,
       isService: false,
-      isReply: false,
+      isReply: Boolean(replyToId),
       link: safeLink(sent),
     },
   })
+}
+
+/**
+ * Clears a chat's unread badge, the same way opening it in Telegram would.
+ *
+ * Read state is Telegram's, not ours — so this tells Telegram, rather than
+ * hiding the count locally and letting the two drift apart.
+ */
+async function handleReadHistory(client: TelegramClient, body: Record<string, unknown>) {
+  const chatIdRaw = String(body.chatId ?? '').trim()
+  if (!chatIdRaw) return json({ error: 'chatId مطلوب' }, 400)
+
+  const chatId = Number(chatIdRaw)
+  if (!Number.isFinite(chatId)) return json({ error: 'chatId غير صالح' }, 400)
+
+  const peer = await client.resolvePeer(chatId)
+  await client.readHistory(peer)
+  return json({ ok: true })
 }
 
 Deno.serve(async (req: Request) => {
@@ -379,11 +451,13 @@ Deno.serve(async (req: Request) => {
         return await handleGetMessages(client, body)
       case 'send-message':
         return await handleSendMessage(supabase, user.id, client, body)
+      case 'read-history':
+        return await handleReadHistory(client, body)
       default:
         return json(
           {
             error:
-              'إجراء غير معروف. الإجراءات المدعومة: list-chats, get-messages, send-message',
+              'إجراء غير معروف. الإجراءات المدعومة: list-chats, get-messages, send-message, read-history',
           },
           400,
         )
