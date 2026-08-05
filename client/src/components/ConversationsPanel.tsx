@@ -616,7 +616,7 @@ export default function ConversationsPanel() {
                             void send();
                           }
                         }}
-                        placeholder="اكتب رسالة… (Enter للإرسال، Shift+Enter لسطر جديد)"
+                        placeholder="اكتب رسالة…"
                         rows={2}
                         disabled={sending}
                         className="rounded-xl border-gray-300 resize-none"
@@ -637,8 +637,11 @@ export default function ConversationsPanel() {
 
                     <div className="flex items-center justify-between mt-1.5">
                       <p className="text-[11px] text-amber-700 flex items-center gap-1">
-                        <AlertTriangle className="w-3 h-3" />
-                        تُرسَل فعلياً من حسابك على Telegram
+                        <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+                        تُرسَل فعلياً من حسابك
+                        <span className="hidden sm:inline">
+                          على Telegram · Enter للإرسال، Shift+Enter لسطر جديد
+                        </span>
                       </p>
                       {draft.length > MAX_MESSAGE_LENGTH - 200 && (
                         <p className="text-[11px] text-gray-500" dir="ltr">
