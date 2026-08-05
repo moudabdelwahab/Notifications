@@ -28,6 +28,7 @@ import {
   Tag,
   CheckCheck,
   Search,
+  Inbox as InboxIcon,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -368,20 +369,30 @@ export default function Dashboard() {
                   <h2 className="text-lg font-bold text-gray-900 font-display">
                     الإشعارات الأخيرة
                   </h2>
-                  <Button
-                    onClick={markAllAsRead}
-                    disabled={markingAll || unreadCount === 0}
-                    variant="outline"
-                    size="sm"
-                    className="rounded-lg flex items-center gap-2"
-                  >
-                    {markingAll ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <CheckCheck className="w-4 h-4" />
-                    )}
-                    تعليم الكل كمقروء
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      onClick={() => setLocation('/inbox')}
+                      size="sm"
+                      className="rounded-lg bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-2"
+                    >
+                      <InboxIcon className="w-4 h-4" />
+                      صندوق الوارد
+                    </Button>
+                    <Button
+                      onClick={markAllAsRead}
+                      disabled={markingAll || unreadCount === 0}
+                      variant="outline"
+                      size="sm"
+                      className="rounded-lg flex items-center gap-2"
+                    >
+                      {markingAll ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <CheckCheck className="w-4 h-4" />
+                      )}
+                      تعليم الكل كمقروء
+                    </Button>
+                  </div>
                 </div>
 
                 {notifications.length > 0 && (
@@ -438,7 +449,8 @@ export default function Dashboard() {
                 </div>
               ) : (
                 <div className="divide-y divide-gray-200">
-                  {visibleNotifications.map((notification) => {
+                  {/* Summary view — the full list with paging lives in /inbox. */}
+                  {visibleNotifications.slice(0, 10).map((notification) => {
                     const style = TYPE_STYLE[notification.type];
                     const TypeIcon = style.Icon;
                     return (
@@ -507,6 +519,15 @@ export default function Dashboard() {
                     </div>
                     );
                   })}
+
+                  {visibleNotifications.length > 10 && (
+                    <button
+                      onClick={() => setLocation('/inbox')}
+                      className="w-full p-4 text-sm font-medium text-blue-600 hover:bg-blue-50 transition-colors"
+                    >
+                      عرض كل الإشعارات ({visibleNotifications.length}) في صندوق الوارد
+                    </button>
+                  )}
                 </div>
               )}
             </div>

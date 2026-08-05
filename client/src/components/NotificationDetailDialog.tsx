@@ -65,35 +65,33 @@ function formatDate(iso: string): string {
   });
 }
 
-export default function NotificationDetailDialog({
+/** Title row, shared by the dialog and the inbox reading pane. */
+export function NotificationDetailHeading({
   notification,
-  open,
-  onOpenChange,
 }: {
-  notification: NotificationDetail | null;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+  notification: NotificationDetail;
 }) {
-  if (!notification) return null;
-
   const heading = TYPE_HEADING[notification.type];
   const HeadingIcon = heading.Icon;
+  return (
+    <span className="flex items-center gap-2">
+      <HeadingIcon className={`w-5 h-5 ${heading.fg}`} />
+      {heading.title}
+    </span>
+  );
+}
+
+/**
+ * Everything below the title. Extracted so the inbox can render the same detail
+ * inline instead of duplicating it in a second layout that would drift.
+ */
+export function NotificationDetailBody({ notification }: { notification: NotificationDetail }) {
   const kind = notification.chat_type ? CHAT_KIND[notification.chat_type] : null;
   const KindIcon = kind?.Icon ?? Hash;
   const chatLink = chatLinkFor(notification.chat_username);
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg" dir="rtl">
-        <DialogHeader className="text-right">
-          <DialogTitle className="flex items-center gap-2">
-            <HeadingIcon className={`w-5 h-5 ${heading.fg}`} />
-            {heading.title}
-          </DialogTitle>
-          <DialogDescription>تفاصيل الإشعار كما وردت من Telegram</DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-4">
+    <div className="space-y-4">
           <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-3 text-sm">
             <span className="text-gray-500 flex items-center gap-1.5">
               <User className="w-4 h-4" />
@@ -177,7 +175,32 @@ export default function NotificationDetailDialog({
               لا يوجد رابط مباشر لهذه الرسالة (المحادثات الخاصة لا تدعم روابط الرسائل)
             </p>
           )}
-        </div>
+    </div>
+  );
+}
+
+export default function NotificationDetailDialog({
+  notification,
+  open,
+  onOpenChange,
+}: {
+  notification: NotificationDetail | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  if (!notification) return null;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg" dir="rtl">
+        <DialogHeader className="text-right">
+          <DialogTitle>
+            <NotificationDetailHeading notification={notification} />
+          </DialogTitle>
+          <DialogDescription>تفاصيل الإشعار كما وردت من Telegram</DialogDescription>
+        </DialogHeader>
+
+        <NotificationDetailBody notification={notification} />
       </DialogContent>
     </Dialog>
   );

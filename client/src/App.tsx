@@ -8,6 +8,7 @@ import Login from "./pages/Login";
 import AuthCallback from "./pages/AuthCallback";
 import Onboarding from "./pages/Onboarding";
 import Dashboard from "./pages/Dashboard";
+import Inbox from "./pages/Inbox";
 import Settings from "./pages/Settings";
 
 
@@ -18,6 +19,7 @@ function Router() {
       <Route path={"/auth/callback"} component={AuthCallback} />
       <Route path={"/onboarding"} component={Onboarding} />
       <Route path={"/dashboard"} component={Dashboard} />
+      <Route path={"/inbox"} component={Inbox} />
       <Route path={"/settings"} component={Settings} />
       <Route path={"/404"} component={NotFound} />
       {/* Redirect root to login */}

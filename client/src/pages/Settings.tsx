@@ -5,7 +5,6 @@ import { useOnboardingStatus } from '@/hooks/useOnboardingStatus';
 import { supabase } from '@/lib/supabase';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import MonitoredChatsPanel from '@/components/MonitoredChatsPanel';
 import { Loader2, ArrowRight, CheckCircle2, AlertCircle } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -279,14 +278,6 @@ export default function Settings() {
               </Button>
             </div>
           </div>
-        </div>
-
-        {/* Which chats to watch */}
-        <div className="mt-8 bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
-          <h2 className="text-xl font-bold text-gray-900 mb-6 font-display">
-            المحادثات المراقَبة
-          </h2>
-          <MonitoredChatsPanel userId={user?.id} />
         </div>
 
         {/* Help Section */}
