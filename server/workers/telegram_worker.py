@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from supabase import Client, create_client
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon.tl.types import InputMessageEntityMentionName, MessageEntityMentionName
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
@@ -39,8 +40,12 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 OVERLAP = timedelta(minutes=1)  # re-check a little either side of the boundary
 MAX_LOOKBACK = timedelta(hours=24)  # first run, or after a long outage
 DEFAULT_LOOKBACK = timedelta(hours=1)  # no recorded scan yet
-DIALOG_LIMIT = 100
-MESSAGE_LIMIT = 200
+# None = every dialog, including archived ones. A fixed limit silently ignored
+# chats past the cutoff.
+DIALOG_LIMIT = None
+# Not a window limit — the window is bounded by `since`. This only stops a
+# runaway chat from consuming the whole run, and it is reported loudly when hit.
+MESSAGE_SAFETY_CAP = 3000
 
 
 def looks_like_telethon_session(session_str: str) -> bool:
@@ -58,6 +63,32 @@ def looks_like_telethon_session(session_str: str) -> bool:
     except Exception:
         return False
     return len(raw) in (263, 275)
+
+
+def mentions_me(message, my_id, my_username) -> bool:
+    """
+    Three independent checks, because no single one catches every mention.
+
+    1. Telegram's own `mentioned` flag, set server-side. Authoritative, and the
+       only thing that catches a mention when you have no username at all.
+    2. Case-insensitive '@username' in the text. Telegram usernames are
+       case-insensitive, so '@Mahmoud' must match the username 'mahmoud'.
+    3. MessageEntityMentionName — a "text mention", where someone taps your name
+       and no '@' is typed at all. Invisible to a plain text search.
+    """
+    if getattr(message, "mentioned", False):
+        return True
+
+    text = message.message or ""
+    if my_username and f"@{my_username}".casefold() in text.casefold():
+        return True
+
+    for entity in getattr(message, "entities", None) or []:
+        if isinstance(entity, (MessageEntityMentionName, InputMessageEntityMentionName)):
+            if getattr(entity, "user_id", None) == my_id:
+                return True
+
+    return False
 
 
 def chat_kind(dialog) -> str:
@@ -121,7 +152,10 @@ async def process_user(user_id, api_id, api_hash, session_str, last_scanned_at) 
         my_id = me.id
         my_username = me.username
         if not my_username:
-            print(f"[{user_id}] note: account has no username, only replies can be detected")
+            print(
+                f"[{user_id}] note: account has no @username. Mentions are still detected via "
+                "Telegram's own mention flag and text mentions."
+            )
 
         scan_started = datetime.now(timezone.utc)
         found = 0
@@ -165,22 +199,49 @@ async def process_user(user_id, api_id, api_hash, session_str, last_scanned_at) 
             if str(dialog.id) in disabled:
                 continue
 
-            async for message in client.iter_messages(dialog.id, limit=MESSAGE_LIMIT):
+            # Collect the whole window first. There is no message-count limit:
+            # capping it truncated busy chats, dropping everything past the cap
+            # even though it was still inside the window.
+            window = []
+            async for message in client.iter_messages(dialog.id, limit=None):
                 if message.date < since:
                     break
-
-                # Never notify someone about their own message.
                 if message.sender_id == my_id:
-                    continue
+                    continue  # never notify someone about their own message
+                window.append(message)
+                if len(window) >= MESSAGE_SAFETY_CAP:
+                    print(
+                        f"[{user_id}] WARNING: hit the {MESSAGE_SAFETY_CAP}-message cap in "
+                        f"'{dialog.name}'; older messages in this window were not examined.",
+                        file=sys.stderr,
+                    )
+                    break
 
-                is_mention = bool(
-                    my_username and message.message and f"@{my_username}" in message.message
-                )
+            if not window:
+                continue
 
-                is_reply = False
-                if not is_mention and message.reply_to:
-                    reply_msg = await message.get_reply_message()
-                    is_reply = bool(reply_msg and reply_msg.sender_id == my_id)
+            # Resolve every replied-to message in one request per chat rather than
+            # one per message.
+            reply_ids = {
+                m.reply_to.reply_to_msg_id
+                for m in window
+                if m.reply_to and getattr(m.reply_to, "reply_to_msg_id", None)
+            }
+            replied_to = {}
+            if reply_ids:
+                ids = list(reply_ids)
+                fetched = await client.get_messages(dialog.id, ids=ids)
+                replied_to = {i: msg for i, msg in zip(ids, fetched) if msg is not None}
+
+            for message in window:
+                target = None
+                if message.reply_to and getattr(message.reply_to, "reply_to_msg_id", None):
+                    target = replied_to.get(message.reply_to.reply_to_msg_id)
+                is_reply = bool(target and target.sender_id == my_id)
+
+                # A reply to you also sets Telegram's `mentioned` flag, so replies
+                # are classified first and mention is what is left over.
+                is_mention = not is_reply and mentions_me(message, my_id, my_username)
 
                 if not (is_mention or is_reply):
                     continue
