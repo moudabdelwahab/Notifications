@@ -2,21 +2,37 @@ import { useEffect, useState } from 'react';
 import { useLocation } from 'wouter';
 import { useAuth } from '@/hooks/useAuth';
 import { useOnboardingStatus } from '@/hooks/useOnboardingStatus';
+import { useNextScanCountdown } from '@/hooks/useNextScanCountdown';
 import { supabase } from '@/lib/supabase';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
-import { Loader2, Bell, Settings, LogOut, MessageSquare, Clock, CheckCircle2 } from 'lucide-react';
+import NotificationDetailDialog, {
+  type NotificationDetail,
+} from '@/components/NotificationDetailDialog';
+import {
+  Loader2,
+  Bell,
+  Settings,
+  LogOut,
+  MessageSquare,
+  Clock,
+  CheckCircle2,
+  RefreshCw,
+  Users,
+  Radio,
+  User as UserIcon,
+} from 'lucide-react';
 import { toast } from 'sonner';
 
-interface Notification {
-  id: string;
-  type: 'mention' | 'reply';
-  source: string;
-  message_text: string;
-  sender_name: string;
-  created_at: string;
+interface Notification extends NotificationDetail {
   read: boolean;
 }
+
+const CHAT_KIND_ICON = {
+  group: Users,
+  channel: Radio,
+  private: UserIcon,
+} as const;
 
 export default function Dashboard() {
   const { user, loading: authLoading, signOut } = useAuth();
@@ -26,6 +42,11 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [monitoringEnabled, setMonitoringEnabled] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [selected, setSelected] = useState<Notification | null>(null);
+  const nextScan = useNextScanCountdown(() => {
+    // A scheduled scan just landed; pull anything realtime may have missed.
+    void loadNotifications();
+  });
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -207,6 +228,33 @@ export default function Dashboard() {
                 </div>
 
                 <div className="pt-4 border-t border-gray-200">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-sm text-gray-600">الفحص التالي بعد</p>
+                    <button
+                      onClick={loadNotifications}
+                      title="تحديث الآن"
+                      className="text-gray-400 hover:text-blue-600 transition-colors"
+                    >
+                      <RefreshCw className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <p className="text-3xl font-bold text-gray-900 tabular-nums" dir="ltr">
+                    {nextScan.label}
+                  </p>
+                  <div className="mt-2 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-blue-600 transition-[width] duration-1000 ease-linear"
+                      style={{ width: `${nextScan.progress * 100}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">
+                    {monitoringEnabled
+                      ? 'قد يتأخر التشغيل المجدول على GitHub بضع دقائق عند الضغط'
+                      : 'المراقبة متوقفة — فعّلها ليبدأ الفحص'}
+                  </p>
+                </div>
+
+                <div className="pt-4 border-t border-gray-200">
                   <p className="text-sm text-gray-600 mb-2">الإشعارات غير المقروءة</p>
                   <p className="text-3xl font-bold text-blue-600">{unreadCount}</p>
                 </div>
@@ -277,7 +325,10 @@ export default function Dashboard() {
                       className={`p-4 hover:bg-gray-50 transition-colors cursor-pointer ${
                         !notification.read ? 'bg-blue-50' : ''
                       }`}
-                      onClick={() => markAsRead(notification.id)}
+                      onClick={() => {
+                        setSelected(notification);
+                        if (!notification.read) markAsRead(notification.id);
+                      }}
                     >
                       <div className="flex items-start gap-4">
                         <div className="flex-shrink-0">
@@ -302,8 +353,17 @@ export default function Dashboard() {
                             )}
                           </div>
 
-                          <p className="text-sm text-gray-600 mb-2">
-                            {notification.type === 'mention' ? 'إشارة في' : 'رد في'} <strong>{notification.source}</strong>
+                          <p className="text-sm text-gray-600 mb-2 flex items-center gap-1.5">
+                            {notification.type === 'mention' ? 'إشارة في' : 'رد في'}
+                            {(() => {
+                              const KindIcon = notification.chat_type
+                                ? CHAT_KIND_ICON[notification.chat_type]
+                                : null;
+                              return KindIcon ? <KindIcon className="w-3.5 h-3.5 text-gray-400" /> : null;
+                            })()}
+                            <strong className="truncate">
+                              {notification.chat_title ?? 'محادثة غير معروفة'}
+                            </strong>
                           </p>
 
                           <p className="text-sm text-gray-700 line-clamp-2 mb-2">
@@ -312,7 +372,7 @@ export default function Dashboard() {
 
                           <div className="flex items-center gap-1 text-xs text-gray-500">
                             <Clock className="w-3 h-3" />
-                            {new Date(notification.created_at).toLocaleString('ar-SA')}
+                            {new Date(notification.created_at).toLocaleString('ar-EG')}
                           </div>
                         </div>
                       </div>
@@ -324,6 +384,14 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+
+      <NotificationDetailDialog
+        notification={selected}
+        open={selected !== null}
+        onOpenChange={(open) => {
+          if (!open) setSelected(null);
+        }}
+      />
     </div>
   );
 }

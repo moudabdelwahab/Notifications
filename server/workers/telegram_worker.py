@@ -52,6 +52,20 @@ def looks_like_telethon_session(session_str: str) -> bool:
     return len(raw) in (263, 275)
 
 
+def chat_kind(dialog) -> str:
+    """
+    Classifies a dialog for display.
+
+    Telethon reports supergroups as both is_group and is_channel, so is_group has
+    to be checked first or every supergroup would be labelled a broadcast channel.
+    """
+    if dialog.is_group:
+        return "group"
+    if dialog.is_channel:
+        return "channel"
+    return "private"
+
+
 async def process_user(user_id, api_id, api_hash, session_str) -> bool:
     """Returns True when the account was scanned successfully."""
     print(f"[{user_id}] scanning")
@@ -125,6 +139,8 @@ async def process_user(user_id, api_id, api_hash, session_str) -> bool:
                     "message_text": message.message or "[Media/No Text]",
                     "message_link": message_link,
                     "sender_name": sender_name,
+                    "chat_title": dialog.name or None,
+                    "chat_type": chat_kind(dialog),
                     "created_at": message.date.isoformat(),
                 }
 
