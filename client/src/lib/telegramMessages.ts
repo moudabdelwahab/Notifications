@@ -35,3 +35,10 @@ export function listChats(): Promise<{ chats: TelegramChat[] }> {
 export function getMessages(chatId: string, limit = 50): Promise<{ messages: TelegramMessage[] }> {
   return callEdgeFunction('telegram-messages', { action: 'get-messages', chatId, limit });
 }
+
+/** Telegram rejects anything longer; the edge function enforces this too. */
+export const MAX_MESSAGE_LENGTH = 4096;
+
+export function sendMessage(chatId: string, text: string): Promise<{ message: TelegramMessage }> {
+  return callEdgeFunction('telegram-messages', { action: 'send-message', chatId, text });
+}

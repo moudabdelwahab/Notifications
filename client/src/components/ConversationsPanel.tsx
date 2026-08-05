@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
 import {
   getMessages,
   listChats,
+  sendMessage,
+  MAX_MESSAGE_LENGTH,
   type TelegramChat,
   type TelegramMessage,
 } from '@/lib/telegramMessages';
@@ -18,6 +21,7 @@ import {
   Paperclip,
   ExternalLink,
   AlertTriangle,
+  Send,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -52,6 +56,8 @@ export default function ConversationsPanel() {
   const [messages, setMessages] = useState<TelegramMessage[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [messagesError, setMessagesError] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
   const threadRef = useRef<HTMLDivElement>(null);
 
   const loadChats = async () => {
@@ -73,19 +79,51 @@ export default function ConversationsPanel() {
     void loadChats();
   }, []);
 
+  const scrollToNewest = () => {
+    requestAnimationFrame(() => {
+      const el = threadRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+  };
+
+  const send = async () => {
+    const text = draft.trim();
+    if (!activeChat || !text || sending) return;
+
+    setSending(true);
+    try {
+      const { message } = await sendMessage(activeChat.id, text);
+      setMessages((prev) => [...prev, message]);
+      setDraft('');
+      scrollToNewest();
+
+      // Keep the chat list's preview and ordering honest without a full reload.
+      setChats((prev) =>
+        prev.map((c) =>
+          c.id === activeChat.id
+            ? { ...c, lastMessage: { text, date: message.date, outgoing: true } }
+            : c,
+        ),
+      );
+    } catch (err) {
+      // The draft is deliberately left in the box so nothing typed is lost.
+      toast.error(err instanceof Error ? err.message : 'تعذر إرسال الرسالة');
+    } finally {
+      setSending(false);
+    }
+  };
+
   const openChat = async (chat: TelegramChat) => {
     setActiveChat(chat);
     setMessages([]);
     setMessagesError(null);
+    setDraft('');
     setLoadingMessages(true);
     try {
       const { messages } = await getMessages(chat.id);
       setMessages(messages);
       // Land at the newest message, the way a chat app does.
-      requestAnimationFrame(() => {
-        const el = threadRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
-      });
+      scrollToNewest();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'تعذر تحميل الرسائل';
       setMessagesError(message);
@@ -326,10 +364,64 @@ export default function ConversationsPanel() {
                   ))}
 
                   <p className="text-center text-xs text-gray-400 pt-2">
-                    آخر {messages.length} رسالة — القراءة فقط، لا يمكن الإرسال من هنا
+                    آخر {messages.length} رسالة
                   </p>
                 </div>
               )}
+
+              {/* Composer */}
+              <div className="border-t border-gray-200 p-3">
+                {activeChat?.type === 'channel' ? (
+                  <p className="text-xs text-gray-500 text-center py-2">
+                    القنوات للقراءة فقط — لا يمكن الإرسال إليها إلا من مالكها.
+                  </p>
+                ) : (
+                  <>
+                    <div className="flex items-end gap-2">
+                      <Textarea
+                        value={draft}
+                        onChange={(e) => setDraft(e.target.value.slice(0, MAX_MESSAGE_LENGTH))}
+                        onKeyDown={(e) => {
+                          // Enter sends, Shift+Enter makes a new line — the
+                          // convention in Telegram itself.
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            void send();
+                          }
+                        }}
+                        placeholder="اكتب رسالة… (Enter للإرسال، Shift+Enter لسطر جديد)"
+                        rows={2}
+                        disabled={sending}
+                        className="rounded-xl border-gray-300 resize-none"
+                      />
+                      <Button
+                        onClick={send}
+                        disabled={sending || !draft.trim()}
+                        className="h-11 w-11 p-0 bg-blue-600 hover:bg-blue-700 text-white rounded-xl flex-shrink-0"
+                        title="إرسال"
+                      >
+                        {sending ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Send className="w-4 h-4" />
+                        )}
+                      </Button>
+                    </div>
+
+                    <div className="flex items-center justify-between mt-1.5">
+                      <p className="text-[11px] text-amber-700 flex items-center gap-1">
+                        <AlertTriangle className="w-3 h-3" />
+                        تُرسَل فعلياً من حسابك على Telegram
+                      </p>
+                      {draft.length > MAX_MESSAGE_LENGTH - 200 && (
+                        <p className="text-[11px] text-gray-500" dir="ltr">
+                          {draft.length} / {MAX_MESSAGE_LENGTH}
+                        </p>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
             </>
           )}
         </div>
