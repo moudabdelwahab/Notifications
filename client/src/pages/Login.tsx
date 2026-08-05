@@ -1,4 +1,5 @@
 import { useAuth } from '@/hooks/useAuth';
+import { useOnboardingStatus } from '@/hooks/useOnboardingStatus';
 import { useLocation } from 'wouter';
 import { useEffect } from 'react';
 import { Button } from '@/components/ui/button';
@@ -6,13 +7,15 @@ import { Loader2, Bell, MessageSquare, Mail } from 'lucide-react';
 
 export default function Login() {
   const { user, loading, signInWithGoogle } = useAuth();
+  const { state: onboarding } = useOnboardingStatus(user?.id);
   const [, setLocation] = useLocation();
 
   useEffect(() => {
-    if (user) {
-      setLocation('/dashboard');
-    }
-  }, [user, setLocation]);
+    // A signed-in user with no Telegram session has not finished setup yet — send them
+    // to the wizard instead of an empty dashboard.
+    if (!user || onboarding === 'loading') return;
+    setLocation(onboarding === 'complete' ? '/dashboard' : '/onboarding');
+  }, [user, onboarding, setLocation]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-white via-blue-50 to-white flex items-center justify-center p-4">

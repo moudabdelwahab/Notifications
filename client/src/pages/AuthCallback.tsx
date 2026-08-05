@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useLocation } from 'wouter';
 import { supabase } from '@/lib/supabase';
+import { hasTelegramSession } from '@/lib/telegramAuth';
 import { Loader2 } from 'lucide-react';
 
 /**
@@ -15,37 +16,48 @@ export default function AuthCallback() {
 
   useEffect(() => {
     let mounted = true;
+    let settled = false;
+    let subscription: { unsubscribe: () => void } | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    /** New users go to the wizard; returning users with a Telegram session skip it. */
+    const routeUser = async (userId: string) => {
+      if (settled) return;
+      settled = true;
+      subscription?.unsubscribe();
+      if (timeoutId) clearTimeout(timeoutId);
+
+      const connected = await hasTelegramSession(userId);
+      if (mounted) setLocation(connected ? '/dashboard' : '/onboarding');
+    };
 
     const handleAuth = async () => {
       try {
-        // Wait a bit for Supabase to process the hash fragments
         const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-        
         if (sessionError) throw sessionError;
 
         if (session?.user) {
-          if (mounted) setLocation('/dashboard');
+          await routeUser(session.user.id);
           return;
         }
 
-        // If no session immediately, listen for changes (Supabase might still be processing)
-        const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-          if (event === 'SIGNED_IN' && session?.user) {
-            subscription.unsubscribe();
-            if (mounted) setLocation('/dashboard');
+        // No session yet — Supabase may still be exchanging the OAuth fragments.
+        const { data } = supabase.auth.onAuthStateChange((event, changed) => {
+          if (event === 'SIGNED_IN' && changed?.user) {
+            void routeUser(changed.user.id);
           }
         });
+        subscription = data.subscription;
 
-        // Timeout after 10 seconds if no session is found
-        setTimeout(() => {
-          if (mounted && isProcessing) {
-            subscription.unsubscribe();
-            setError('انتهت مهلة تسجيل الدخول. يرجى المحاولة مرة أخرى.');
-            setIsProcessing(false);
-            setTimeout(() => setLocation('/login'), 3000);
-          }
+        timeoutId = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          subscription?.unsubscribe();
+          if (!mounted) return;
+          setError('انتهت مهلة تسجيل الدخول. يرجى المحاولة مرة أخرى.');
+          setIsProcessing(false);
+          setTimeout(() => setLocation('/login'), 3000);
         }, 10000);
-
       } catch (err) {
         if (!mounted) return;
         const message = err instanceof Error ? err.message : 'حدث خطأ أثناء معالجة تسجيل الدخول';
@@ -55,10 +67,12 @@ export default function AuthCallback() {
       }
     };
 
-    handleAuth();
+    void handleAuth();
 
     return () => {
       mounted = false;
+      subscription?.unsubscribe();
+      if (timeoutId) clearTimeout(timeoutId);
     };
   }, [setLocation]);
 

@@ -1,235 +1,139 @@
-# دليل إعداد نظام مراقبة Telegram
+# ربط حساب Telegram — كيف يعمل الـ Onboarding
 
 ## نظرة عامة
 
-هذا النظام يوفر مراقبة تلقائية للإشارات والردود على Telegram مع إرسال إشعارات فورية عبر البريد الإلكتروني. يتضمن:
+المستخدم يربط حسابه الشخصي على Telegram بالتطبيق عبر تسجيل دخول **MTProto حقيقي** ببيانات
+API الخاصة به. النتيجة النهائية هي *string session* بصيغة Telethon مخزّنة في
+`telegram_sessions.session_data`، وهي ما يستخدمه عامل المراقبة بالـ Python لقراءة الإشارات
+والردود.
 
-1. **واجهة أمامية** - تدفق OTP كامل لربط حساب Telegram
-2. **Edge Function** - إدارة جلسات Telegram وتخزينها بأمان
-3. **عامل GitHub Actions** - يعمل كل 5 دقائق لفحص الإشارات والردود
-4. **قاعدة بيانات Supabase** - تخزين الإشعارات والجلسات
+> ⚠️ هذا ليس بوت Telegram. البوت لا يستطيع رؤية إشارات المستخدم في مجموعاته الخاصة،
+> لذلك المشروع يستخدم MTProto بحساب المستخدم نفسه.
 
 ## المتطلبات
 
 - حساب Telegram نشط
-- حساب Supabase
-- حساب GitHub مع Actions مفعل
 - API ID و API Hash من [my.telegram.org](https://my.telegram.org)
+- مشروع Supabase (الحالي: `ywjtqkkbxqnisduelgre`)
 
-## خطوات الإعداد
-
-### 1. إعداد Supabase
-
-#### أ. تطبيق الهجرات (Migrations)
-
-قم بتطبيق ملف `supabase-setup.sql` على مشروع Supabase الخاص بك:
-
-```bash
-# استخدم واجهة Supabase أو CLI
-supabase db push
-```
-
-هذا سينشئ الجداول التالية:
-- `users` - بيانات المستخدمين و API credentials
-- `notifications` - الإشارات والردود المكتشفة
-- `telegram_sessions` - جلسات Telegram المشفرة
-
-#### ب. نشر Edge Function
-
-```bash
-supabase functions deploy telegram-auth
-```
-
-### 2. إعداد GitHub Secrets
-
-أضف الأسرار التالية إلى مستودع GitHub:
-
-| المفتاح | الوصف |
-|--------|-------|
-| `SUPABASE_URL` | رابط مشروع Supabase (مثال: `https://ywjtqkkbxqnisduelgre.supabase.co`) |
-| `SUPABASE_SERVICE_ROLE_KEY` | مفتاح الخدمة من إعدادات Supabase (يجب أن يكون سري!) |
-
-**كيفية إضافة الأسرار:**
-
-1. اذهب إلى Settings → Secrets and variables → Actions
-2. اضغط "New repository secret"
-3. أضف المفاتيح المذكورة أعلاه
-
-### 3. إعداد Telegram API
-
-#### أ. الحصول على API ID و API Hash
-
-1. اذهب إلى [my.telegram.org](https://my.telegram.org)
-2. سجل دخولك برقم هاتفك
-3. اضغط على "API development tools"
-4. أنشئ تطبيقاً جديداً:
-   - **App title**: مثلاً "Telegram Notifier"
-   - **Short name**: مثلاً "notifier"
-   - اقبل الشروط واضغط "Create my app"
-5. انسخ `api_id` و `api_hash`
-
-#### ب. ربط حسابك عبر الواجهة الأمامية
-
-1. افتح التطبيق وسجل دخولك
-2. اذهب إلى "Onboarding" أو "الإعدادات"
-3. أدخل API ID و API Hash
-4. أدخل رقم هاتفك (بصيغة دولية: +966500000000)
-5. أدخل رمز التحقق الذي ستتلقاه في Telegram
-6. تم! جلستك الآن محفوظة بأمان
-
-## كيفية عمل النظام
-
-### تدفق المصادقة (OTP)
+## المعمارية
 
 ```
-المستخدم
-  ↓
-1. أدخل API ID و API Hash
-  ↓
-2. أدخل رقم الهاتف
-  ↓
-3. إرسال OTP عبر Telegram API
-  ↓
-4. أدخل الرمز المستقبل
-  ↓
-5. التحقق والحصول على جلسة
-  ↓
-6. تخزين الجلسة في Supabase (مشفرة)
+المتصفح (Onboarding.tsx)
+      │  supabase.functions.invoke('telegram-auth', …)
+      ▼
+Edge Function: telegram-auth      ← Deno + mtcute (@mtcute/web)
+      │  MTProto عبر WebSocket
+      ▼
+خوادم Telegram
+      │
+      ▼
+Postgres: otp_sessions (مؤقت) → telegram_sessions (نهائي، بصيغة Telethon)
+      │
+      ▼
+server/workers/telegram_worker.py (Telethon)
 ```
 
-### عملية المراقبة (GitHub Actions)
+### لماذا `@mtcute/web` تحديدًا؟
 
+- `@mtcute/deno` يعتمد على `node:sqlite` وهو **غير متاح** في Supabase Edge Runtime
+  (يفشل البناء بـ `Unknown built-in "node:" module: sqlite`).
+- `@mtcute/web` يستخدم WebSocket + تخزين في الذاكرة، ويعمل داخل الـ edge runtime.
+  تم التحقق عمليًا: مصافحة DH كاملة ورد حيّ من Telegram (`help.getNearestDc`).
+
+## الخطوات الثلاث
+
+| Action | المدخلات | المخرجات |
+|---|---|---|
+| `send-otp` | `phone`, `apiId`, `apiHash` | `sessionId`, `phoneCodeHash`, `codeType`, `codeLength`, `timeout` |
+| `verify-otp` | `sessionId`, `code` | `{success:true}` أو `{requiresPassword:true, passwordHint}` |
+| `verify-password` | `sessionId`, `password` | `{success:true}` |
+
+### نقطة جوهرية: استمرارية مفتاح المصادقة
+
+الـ `phone_code_hash` الذي يرجعه Telegram **مرتبط بمفتاح المصادقة (auth key)** الذي أنشأه
+`send-otp`. واستدعاءات Edge Functions لا تتشارك الذاكرة — كل استدعاء قد يقع على isolate
+مختلف. لذلك تُحفَظ جلسة mtcute الوسيطة في `otp_sessions.session_string` ويُعاد تحميلها في
+`verify-otp` عبر `importSession()`.
+
+> هذا بالضبط ما كان مكسورًا في النسخة السابقة: كانت تحتفظ بالحالة في `Map` داخل الذاكرة،
+> فكان `verify-otp` يفشل دائمًا بـ "Session not found".
+
+### تحويل صيغة الجلسة
+
+`mtcute` و`Telethon` يستخدمان صيغتين مختلفتين للـ string session. عند نجاح الدخول:
+
+```ts
+const mtcuteSession = await client.exportSession()
+const telethonSession = convertToTelethonSession(readStringSession(mtcuteSession))
 ```
-GitHub Actions Trigger (كل 5 دقائق)
-  ↓
-استرجاع جميع الجلسات النشطة من Supabase
-  ↓
-للكل جلسة:
-  - الاتصال بـ Telegram
-  - فحص آخر 50 رسالة في كل محادثة
-  - البحث عن الإشارات (@username)
-  - البحث عن الردود على الرسائل الخاصة بك
-  ↓
-إدراج الإشارات/الردود الجديدة في جدول notifications
-  ↓
-تحديث واجهة المستخدم تلقائياً (Real-time مع Supabase)
-```
 
-## ملفات المشروع الرئيسية
+`@mtcute/convert` يُخرج مباشرةً سلسلة Telethon v1 جاهزة (تبدأ بـ `1` ثم base64) — لا حاجة
+لاستدعاء `serializeTelethonSession` بعدها.
 
-### الواجهة الأمامية
+## التحقق بخطوتين (2FA)
 
-- **`client/src/pages/Onboarding.tsx`** - تدفق OTP الكامل
-  - خطوات: Welcome → Telegram Setup → API Credentials → Phone Input → OTP Verify → Complete
-  - يحفظ بيانات API و الجلسة في Supabase
+عند رمي Telegram لخطأ `SESSION_PASSWORD_NEEDED`:
 
-- **`client/src/pages/Settings.tsx`** - إدارة الإعدادات
-  - تحديث API credentials
-  - تفعيل/تعطيل المراقبة التلقائية
-  - إعادة الاتصال بـ Telegram
+1. تُحفَظ نفس الجلسة مع `auth_state = 'pending_password'` و`password_hint` من Telegram.
+2. ترجع الاستجابة `{ requiresPassword: true, passwordHint }`.
+3. الواجهة تنتقل لخطوة كلمة المرور، ثم `verify-password` ينادي `client.checkPassword()`.
 
-### الخادم والعمال
-
-- **`server/workers/telegram_worker.py`** - عامل مراقبة Telegram
-  - يعمل كل 5 دقائق عبر GitHub Actions
-  - يفحص الإشارات والردود
-  - يحفظ النتائج في Supabase
-
-- **`.github/workflows/telegram-monitor.yml`** - تكوين GitHub Actions
-  - يشغل العامل كل 5 دقائق (*/5 * * * *)
-  - يستخدم Python 3.10
-  - يحقن متغيرات البيئة من GitHub Secrets
-
-### Supabase
-
-- **`supabase/functions/telegram-auth/index.ts`** - Edge Function
-  - تخزين جلسات Telegram
-  - يمكن توسيعها لاحقاً لإدارة OTP
-
-- **`supabase-setup.sql`** - مخطط قاعدة البيانات
-  - جداول: users, notifications, telegram_sessions
-  - Row Level Security (RLS) مفعل
-  - Indexes محسنة للأداء
+كلمة المرور تُتحقَّق عبر SRP لدى Telegram — لا تُخزَّن ولا تُسجَّل في أي مكان.
 
 ## الأمان
 
-### حماية البيانات
+- `otp_sessions` **بلا سياسات RLS** ومنزوعة الصلاحيات من `anon`/`authenticated`. تحتوي على
+  auth key حيّ، ولا يلمسها إلا الـ Edge Function بصلاحية service role.
+- الصفوف المهجورة تُحذف بعد 15 دقيقة (`cleanup_expired_otp_sessions()`).
+- `send-otp` محدود بطلب واحد كل 60 ثانية لكل مستخدم لتفادي `FLOOD_WAIT` من Telegram.
+- الدالة تعمل بـ `verify_jwt = true`، وتتحقق إضافيًا من التوكن عبر `auth.getUser()`.
+- `telegram_sessions.session_data` يمنح وصولًا كاملًا لحساب Telegram للمستخدم. RLS تقصره
+  على صاحبه فقط. **التشفير عند التخزين لم يُنفَّذ بعد** — انظر "أعمال مفتوحة".
 
-1. **API Keys** - محفوظة في GitHub Secrets (لا تُظهر في الكود)
-2. **Telegram Sessions** - مشفرة في Supabase
-3. **Row Level Security** - كل مستخدم يرى فقط بيانته
-4. **HTTPS فقط** - جميع الاتصالات مشفرة
+## متغيرات البيئة
 
-### أفضل الممارسات
+الـ Edge Function تحتاج فقط ما توفّره Supabase تلقائيًا:
 
-- لا تشارك `api_hash` مع أحد
-- استخدم GitHub Secrets لجميع المفاتيح الحساسة
-- فعّل 2FA على حسابك في Telegram
-- راجع الأذونات المطلوبة بانتظام
+| المتغير | المصدر |
+|---|---|
+| `SUPABASE_URL` | تلقائي |
+| `SUPABASE_SERVICE_ROLE_KEY` | تلقائي |
+
+> لم يعد هناك أي اعتماد على `TELEGRAM_BRIDGE_API_URL`. النسخة المنشورة سابقًا كانت تُمرّر
+> الطلبات إلى خدمة وسيطة خارجية غير موجودة في هذا المستودع.
+
+عامل المراقبة (GitHub Actions) يحتاج `SUPABASE_URL` و`SUPABASE_SERVICE_ROLE_KEY` كـ secrets.
+
+## الإعداد والنشر
+
+```bash
+# 1. الجداول والسياسات
+psql "$DATABASE_URL" -f supabase-setup.sql
+psql "$DATABASE_URL" -f supabase/migrations/20260805_harden_onboarding_schema_and_rls.sql
+
+# 2. الـ Edge Function
+supabase functions deploy telegram-auth --project-ref ywjtqkkbxqnisduelgre
+```
+
+أو عبر Supabase MCP (`deploy_edge_function`) مع `import_map_path: deno.json`.
 
 ## استكشاف الأخطاء
 
-### المشكلة: "Function not found" عند إرسال OTP
+| الرسالة | السبب |
+|---|---|
+| `API ID أو API Hash غير صحيح` | `API_ID_INVALID` — راجع بياناتك من my.telegram.org |
+| `رمز التحقق غير صحيح` | `PHONE_CODE_INVALID` |
+| `انتهت صلاحية رمز التحقق` | `PHONE_CODE_EXPIRED` — الجلسة تُحذف تلقائيًا، ابدأ من جديد |
+| `الحساب محمي بالتحقق بخطوتين` | `SESSION_PASSWORD_NEEDED` — متوقع، الواجهة تنتقل لخطوة كلمة المرور |
+| `Telegram يطلب الانتظار N ثانية` | `FLOOD_WAIT_N` |
+| `انتظر N ثانية قبل طلب رمز جديد` | حد إعادة الإرسال المحلي (60 ثانية) |
 
-**الحل:**
-- تأكد من نشر Edge Function: `supabase functions deploy telegram-auth`
-- تحقق من أن SUPABASE_URL صحيح في الكود
+سجلّات التنفيذ: Supabase Dashboard → Edge Functions → telegram-auth → Logs.
 
-### المشكلة: جلسة Telegram منتهية الصلاحية
+## أعمال مفتوحة
 
-**الحل:**
-- اذهب إلى الإعدادات واضغط "إعادة الاتصال"
-- أدخل بيانات Telegram مرة أخرى
-- سيتم إنشاء جلسة جديدة
-
-### المشكلة: GitHub Actions فشل
-
-**الحل:**
-1. تحقق من أن `SUPABASE_URL` و `SUPABASE_SERVICE_ROLE_KEY` موجودة
-2. انظر إلى سجلات GitHub Actions: Actions → telegram-monitor
-3. تأكد من أن جدول `telegram_sessions` يحتوي على بيانات
-
-## التطوير المحلي
-
-### تشغيل العامل محلياً
-
-```bash
-# ثبت المتطلبات
-pip install telethon supabase python-dotenv
-
-# أنشئ ملف .env
-echo "SUPABASE_URL=https://your-project.supabase.co" > .env
-echo "SUPABASE_SERVICE_ROLE_KEY=your-service-key" >> .env
-
-# شغّل العامل
-python server/workers/telegram_worker.py
-```
-
-### تشغيل الواجهة الأمامية
-
-```bash
-# ثبت المتطلبات
-pnpm install
-
-# شغّل خادم التطوير
-pnpm dev
-```
-
-## الخطوات التالية
-
-1. **إضافة إشعارات بريد إلكتروني** - استخدم Supabase Functions لإرسال بريد عند اكتشاف إشارة
-2. **لوحة تحكم متقدمة** - عرض الإشارات والردود مع إحصائيات
-3. **تصفية الكلمات المفتاحية** - اختر الكلمات التي تريد مراقبتها
-4. **Webhook للتطبيقات الخارجية** - أرسل الإشعارات إلى Slack أو Discord
-5. **دعم عدة حسابات** - ربط عدة حسابات Telegram
-
-## الدعم والمساعدة
-
-للمزيد من المعلومات:
-- [توثيق Telethon](https://docs.telethon.dev/)
-- [توثيق Supabase](https://supabase.com/docs)
-- [توثيق GitHub Actions](https://docs.github.com/en/actions)
-
----
-
-**آخر تحديث:** يونيو 2026
+- تشفير `telegram_sessions.session_data` و`users.telegram_api_hash` عند التخزين
+  (مثلًا عبر Supabase Vault) بدل تخزينهما كنص صريح.
+- جدولة `cleanup_expired_otp_sessions()` دوريًا عبر `pg_cron`.
+- تفعيل "Leaked password protection" من إعدادات Auth.

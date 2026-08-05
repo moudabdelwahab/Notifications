@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS public.notifications (
   read BOOLEAN DEFAULT FALSE
 );
 
--- Create OTP sessions table
+-- Create OTP sessions table.
+-- `session_string` holds the in-progress MTProto session (auth key) between send-otp and
+-- verify-otp, so this table is service-role only and has no RLS policies by design.
 CREATE TABLE IF NOT EXISTS public.otp_sessions (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
@@ -35,8 +37,11 @@ CREATE TABLE IF NOT EXISTS public.otp_sessions (
   api_id INTEGER NOT NULL,
   api_hash TEXT NOT NULL,
   phone_code_hash TEXT NOT NULL,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(user_id, phone_number)
+  auth_state TEXT DEFAULT 'pending_otp'
+    CHECK (auth_state IN ('pending_otp', 'pending_password', 'completed')),
+  password_hint TEXT,
+  session_string TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Create telegram_sessions table
@@ -71,15 +76,8 @@ CREATE POLICY "Users can view their own data" ON public.users
 CREATE POLICY "Users can update their own data" ON public.users
   FOR UPDATE USING (auth.uid() = id);
 
--- Create RLS policies for otp_sessions table
-CREATE POLICY "Users can view their own OTP sessions" ON public.otp_sessions
-  FOR SELECT USING (auth.uid() = user_id);
-
-CREATE POLICY "Users can insert their own OTP sessions" ON public.otp_sessions
-  FOR INSERT WITH CHECK (auth.uid() = user_id);
-
-CREATE POLICY "Users can delete their own OTP sessions" ON public.otp_sessions
-  FOR DELETE USING (auth.uid() = user_id);
+-- otp_sessions deliberately has NO policies: only the telegram-auth Edge Function
+-- (service role, which bypasses RLS) may touch it, because it stores auth keys.
 
 -- Create RLS policies for notifications table
 CREATE POLICY "Users can view their own notifications" ON public.notifications
@@ -95,19 +93,32 @@ CREATE POLICY "Users can view their own session" ON public.telegram_sessions
 CREATE POLICY "Users can update their own session" ON public.telegram_sessions
   FOR UPDATE USING (auth.uid() = user_id);
 
--- Create function to handle user creation on auth
+CREATE POLICY "Users can delete their own session" ON public.telegram_sessions
+  FOR DELETE USING (auth.uid() = user_id);
+
+-- Create function to handle user creation on auth.
+-- search_path is pinned, and a failure here must never abort the signup transaction.
 CREATE OR REPLACE FUNCTION public.handle_new_user()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
 BEGIN
   INSERT INTO public.users (id, email, google_id)
   VALUES (
     NEW.id,
-    NEW.email,
+    COALESCE(NEW.email, NEW.id::text || '@placeholder.local'),
     NEW.raw_user_meta_data->>'sub'
-  );
+  )
+  ON CONFLICT (id) DO NOTHING;
   RETURN NEW;
+EXCEPTION
+  WHEN OTHERS THEN
+    RAISE WARNING 'handle_new_user: could not create profile for %: %', NEW.id, SQLERRM;
+    RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$;
 
 -- Create trigger for new user creation
 DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
@@ -115,9 +126,12 @@ CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
 
--- Grant permissions
+-- Grant permissions.
+-- otp_sessions is intentionally excluded: it is service-role only.
 GRANT USAGE ON SCHEMA public TO authenticated;
 GRANT ALL ON public.users TO authenticated;
-GRANT ALL ON public.otp_sessions TO authenticated;
 GRANT ALL ON public.notifications TO authenticated;
 GRANT ALL ON public.telegram_sessions TO authenticated;
+
+-- Trigger functions must not be callable through PostgREST's /rest/v1/rpc surface.
+REVOKE ALL ON FUNCTION public.handle_new_user() FROM PUBLIC, anon, authenticated;
