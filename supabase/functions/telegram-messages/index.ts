@@ -140,6 +140,35 @@ async function closeQuietly(client: TelegramClient | null): Promise<void> {
   await Promise.race([closing, new Promise((resolve) => setTimeout(resolve, 1500))])
 }
 
+/**
+ * Resolves a chat id, priming the peer cache first if it has to.
+ *
+ * Every invocation builds a client on a fresh MemoryStorage, and a Telethon
+ * string session carries no peer cache — so the client starts out knowing no
+ * access hashes at all. Basic groups and the account itself can be addressed by
+ * id alone, which is why some chats worked; users and supergroups need their
+ * access hash and failed with "Peer <id> is not found in local cache".
+ *
+ * Walking the dialog list is what populates those hashes. It is only done after
+ * a miss, so chats that resolve directly still cost nothing.
+ */
+async function resolveChat(client: TelegramClient, chatId: number) {
+  try {
+    return await client.resolvePeer(chatId)
+  } catch (err) {
+    if (!/not found in local cache/i.test(err instanceof Error ? err.message : String(err))) {
+      throw err
+    }
+
+    console.log('[PEER] priming cache for', chatId)
+    for await (const _dialog of client.iterDialogs({ limit: CHAT_LIMIT })) {
+      // Iterating is the point: mtcute caches each peer as it goes.
+    }
+
+    return await client.resolvePeer(chatId)
+  }
+}
+
 function summarise(message: any): string {
   if (message.text) return message.text
   if (message.media) return `[${message.media.type ?? 'مرفق'}]`
@@ -190,7 +219,7 @@ async function handleGetMessages(client: TelegramClient, body: Record<string, un
     MAX_MESSAGE_LIMIT,
   )
 
-  const peer = await client.resolvePeer(chatId)
+  const peer = await resolveChat(client, chatId)
   const messages: unknown[] = []
 
   for await (const message of client.iterHistory(peer, { limit })) {
@@ -334,7 +363,7 @@ async function handleSendMessage(
   const limit = await overRateLimit(supabase, userId)
   if (limit.blocked) return json({ error: limit.message }, 429)
 
-  const peer = await client.resolvePeer(chatId)
+  const peer = await resolveChat(client, chatId)
 
   // replyTo comes from mtcute's CommonSendParams and is shared by both send
   // methods, so a reply works with or without an attachment.
@@ -401,7 +430,7 @@ async function handleReadHistory(client: TelegramClient, body: Record<string, un
   const chatId = Number(chatIdRaw)
   if (!Number.isFinite(chatId)) return json({ error: 'chatId غير صالح' }, 400)
 
-  const peer = await client.resolvePeer(chatId)
+  const peer = await resolveChat(client, chatId)
   await client.readHistory(peer)
   return json({ ok: true })
 }
