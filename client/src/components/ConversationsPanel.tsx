@@ -59,6 +59,7 @@ export default function ConversationsPanel() {
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const threadRef = useRef<HTMLDivElement>(null);
+  const retryKeyRef = useRef<string | null>(null);
 
   const loadChats = async () => {
     setLoadingChats(true);
@@ -90,9 +91,15 @@ export default function ConversationsPanel() {
     const text = draft.trim();
     if (!activeChat || !text || sending) return;
 
+    // Held across retries: the server uses it to recognise a repeat of the same
+    // message and return the original result instead of sending a second copy.
+    // Cleared only once a send is acknowledged.
+    if (!retryKeyRef.current) retryKeyRef.current = crypto.randomUUID();
+
     setSending(true);
     try {
-      const { message } = await sendMessage(activeChat.id, text);
+      const { message } = await sendMessage(activeChat.id, text, retryKeyRef.current);
+      retryKeyRef.current = null;
       setMessages((prev) => [...prev, message]);
       setDraft('');
       scrollToNewest();
@@ -106,8 +113,16 @@ export default function ConversationsPanel() {
         ),
       );
     } catch (err) {
-      // The draft is deliberately left in the box so nothing typed is lost.
-      toast.error(err instanceof Error ? err.message : 'تعذر إرسال الرسالة');
+      // The draft is deliberately left in the box so nothing typed is lost, and
+      // retryKeyRef is deliberately kept so pressing send again is safe.
+      const message = err instanceof Error ? err.message : 'تعذر إرسال الرسالة';
+      const lostResponse = /Failed to send a request|Failed to fetch|network/i.test(message);
+      toast.error(
+        lostResponse
+          ? 'انقطع الرد قبل وصوله. قد تكون الرسالة أُرسلت بالفعل — إعادة المحاولة آمنة ولن تُرسل نسخة ثانية.'
+          : message,
+        { duration: 8000 },
+      );
     } finally {
       setSending(false);
     }
@@ -118,6 +133,7 @@ export default function ConversationsPanel() {
     setMessages([]);
     setMessagesError(null);
     setDraft('');
+    retryKeyRef.current = null;
     setLoadingMessages(true);
     try {
       const { messages } = await getMessages(chat.id);

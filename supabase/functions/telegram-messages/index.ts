@@ -110,6 +110,26 @@ async function openClient(creds: Credentials): Promise<TelegramClient> {
   return client
 }
 
+/**
+ * Closes the client without letting it delay the response.
+ *
+ * Supabase's runtime keeps the isolate alive for anything handed to
+ * `waitUntil`, so cleanup finishes after the reply is on its way. Where that is
+ * unavailable, a short cap is still better than an unbounded wait.
+ */
+async function closeQuietly(client: TelegramClient | null): Promise<void> {
+  if (!client) return
+  const closing = client.destroy().catch(() => {})
+
+  const runtime = (globalThis as any).EdgeRuntime
+  if (typeof runtime?.waitUntil === 'function') {
+    runtime.waitUntil(closing)
+    return
+  }
+
+  await Promise.race([closing, new Promise((resolve) => setTimeout(resolve, 1500))])
+}
+
 function summarise(message: any): string {
   if (message.text) return message.text
   if (message.media) return `[${message.media.type ?? 'مرفق'}]`
@@ -234,6 +254,7 @@ async function handleSendMessage(
 ) {
   const chatIdRaw = String(body.chatId ?? '').trim()
   const text = String(body.text ?? '').trim()
+  const dedupeKey = String(body.dedupeKey ?? '').trim() || null
 
   if (!chatIdRaw) return json({ error: 'chatId مطلوب' }, 400)
   if (!text) return json({ error: 'لا يمكن إرسال رسالة فارغة' }, 400)
@@ -243,6 +264,37 @@ async function handleSendMessage(
 
   const chatId = Number(chatIdRaw)
   if (!Number.isFinite(chatId)) return json({ error: 'chatId غير صالح' }, 400)
+
+  // A send can succeed at Telegram and still fail to reach the browser, so the
+  // user's retry must not become a second message. Same key, same answer.
+  if (dedupeKey) {
+    const { data: already } = await supabase
+      .from('sent_messages_log')
+      .select('message_id, sent_at')
+      .eq('user_id', userId)
+      .eq('dedupe_key', dedupeKey)
+      .maybeSingle()
+
+    if (already) {
+      console.log('[SEND] replaying dedupe key', dedupeKey, '- not resending')
+      return json({
+        message: {
+          id: already.message_id ?? null,
+          text,
+          date: already.sent_at ?? new Date().toISOString(),
+          outgoing: true,
+          senderName: 'أنت',
+          senderId: null,
+          hasMedia: false,
+          mediaType: null,
+          isService: false,
+          isReply: false,
+          link: null,
+        },
+        deduplicated: true,
+      })
+    }
+  }
 
   const limit = await overRateLimit(supabase, userId)
   if (limit.blocked) return json({ error: limit.message }, 429)
@@ -255,6 +307,7 @@ async function handleSendMessage(
     user_id: userId,
     chat_id: chatIdRaw,
     message_id: sent?.id ?? null,
+    dedupe_key: dedupeKey,
   })
   if (logError) {
     // The message is already delivered; losing the audit row must not look like
@@ -361,10 +414,10 @@ Deno.serve(async (req: Request) => {
 
     return json({ error: `تعذر تنفيذ الطلب (${detail})` }, 500)
   } finally {
-    try {
-      await client?.destroy()
-    } catch {
-      // Closing a socket Telegram already dropped is not worth surfacing.
-    }
+    // `finally` runs before the response is handed back, and destroy() waits for
+    // the MTProto socket to close. That wait was long enough for the browser to
+    // give up on a send whose message had already been delivered — the user saw
+    // "failed" for a message that arrived. Cleanup must never hold the response.
+    await closeQuietly(client)
   }
 })

@@ -39,6 +39,22 @@ export function getMessages(chatId: string, limit = 50): Promise<{ messages: Tel
 /** Telegram rejects anything longer; the edge function enforces this too. */
 export const MAX_MESSAGE_LENGTH = 4096;
 
-export function sendMessage(chatId: string, text: string): Promise<{ message: TelegramMessage }> {
-  return callEdgeFunction('telegram-messages', { action: 'send-message', chatId, text });
+/**
+ * `dedupeKey` must stay the same across retries of the same message.
+ *
+ * A send can succeed at Telegram and still fail to reach the browser — that was
+ * observed in practice — so a retry without a stable key would deliver the
+ * message twice.
+ */
+export function sendMessage(
+  chatId: string,
+  text: string,
+  dedupeKey: string,
+): Promise<{ message: TelegramMessage; deduplicated?: boolean }> {
+  return callEdgeFunction('telegram-messages', {
+    action: 'send-message',
+    chatId,
+    text,
+    dedupeKey,
+  });
 }
