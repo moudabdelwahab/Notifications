@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useLocation } from 'wouter';
 import { useAuth } from '@/hooks/useAuth';
+import { useOnboardingStatus } from '@/hooks/useOnboardingStatus';
 import { supabase } from '@/lib/supabase';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -15,6 +16,7 @@ interface UserSettings {
 
 export default function Settings() {
   const { user, loading: authLoading } = useAuth();
+  const { state: onboarding } = useOnboardingStatus(user?.id);
   const [, setLocation] = useLocation();
   const [settings, setSettings] = useState<UserSettings>({
     telegram_api_id: null,
@@ -210,23 +212,43 @@ export default function Settings() {
                 </button>
               </div>
 
-              <div className="flex items-center justify-between p-4 bg-blue-50 rounded-xl border border-blue-100">
+              <div
+                className={`flex items-center justify-between p-4 rounded-xl border ${
+                  onboarding === 'complete'
+                    ? 'bg-blue-50 border-blue-100'
+                    : 'bg-amber-50 border-amber-200'
+                }`}
+              >
                 <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
-                    <AlertCircle className="w-5 h-5 text-blue-600" />
+                  <div
+                    className={`w-10 h-10 rounded-full flex items-center justify-center ${
+                      onboarding === 'complete' ? 'bg-blue-100' : 'bg-amber-100'
+                    }`}
+                  >
+                    <AlertCircle
+                      className={`w-5 h-5 ${
+                        onboarding === 'complete' ? 'text-blue-600' : 'text-amber-600'
+                      }`}
+                    />
                   </div>
                   <div>
                     <p className="font-semibold text-gray-900">حساب Telegram</p>
-                    <p className="text-sm text-gray-600">متصل وجاهز للمراقبة</p>
+                    <p className="text-sm text-gray-600">
+                      {onboarding === 'loading'
+                        ? 'جاري التحقق من حالة الاتصال...'
+                        : onboarding === 'complete'
+                          ? 'متصل وجاهز للمراقبة'
+                          : 'غير متصل — أكمل الإعداد لبدء المراقبة'}
+                    </p>
                   </div>
                 </div>
-                <Button 
-                  variant="outline" 
-                  size="sm" 
+                <Button
+                  variant="outline"
+                  size="sm"
                   className="rounded-lg bg-white"
                   onClick={handleReconnect}
                 >
-                  إعادة الاتصال
+                  {onboarding === 'complete' ? 'إعادة الاتصال' : 'إكمال الإعداد'}
                 </Button>
               </div>
             </div>

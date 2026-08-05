@@ -1,7 +1,8 @@
 {
   "imports": {
-    "std/": "https://deno.land/std@0.168.0/",
-    "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2",
-    "telegram": "https://esm.sh/telegram@3.14.0"
+    "@mtcute/web": "jsr:@mtcute/web@0.31.0",
+    "@mtcute/core": "jsr:@mtcute/core@0.31.0",
+    "@mtcute/convert": "jsr:@mtcute/convert@0.31.0",
+    "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2"
   }
 }

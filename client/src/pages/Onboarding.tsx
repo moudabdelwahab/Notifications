@@ -1,14 +1,33 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useLocation } from 'wouter';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { InputOTP, InputOTPGroup, InputOTPSlot } from '@/components/ui/input-otp';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
+import {
+  callTelegramAuth,
+  type SendOtpResult,
+  type VerifyOtpResult,
+  type VerifyPasswordResult,
+} from '@/lib/telegramAuth';
 import { Loader2, ExternalLink, CheckCircle2, AlertCircle, Phone, Lock, Key } from 'lucide-react';
 import { toast } from 'sonner';
 
-type OnboardingStep = 'welcome' | 'telegram-setup' | 'credentials' | 'phone-input' | 'otp-verify' | 'password-verify' | 'complete';
+const STEPS = [
+  'welcome',
+  'telegram-setup',
+  'credentials',
+  'phone-input',
+  'otp-verify',
+  'password-verify',
+  'complete',
+] as const;
+
+type OnboardingStep = (typeof STEPS)[number];
+
+/** Telegram sends 5-digit codes today, but the length is server-provided so we honour it. */
+const DEFAULT_OTP_LENGTH = 5;
 
 export default function Onboarding() {
   const { user, loading: authLoading } = useAuth();
@@ -18,13 +37,11 @@ export default function Onboarding() {
   const [apiHash, setApiHash] = useState('');
   const [phone, setPhone] = useState('');
   const [otp, setOtp] = useState('');
+  const [otpLength, setOtpLength] = useState(DEFAULT_OTP_LENGTH);
   const [password, setPassword] = useState('');
-  const [phoneCodeHash, setPhoneCodeHash] = useState('');
   const [sessionId, setSessionId] = useState('');
-  const [sessionString, setSessionString] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [otpSent, setOtpSent] = useState(false);
   const [passwordHint, setPasswordHint] = useState<string | null>(null);
 
   useEffect(() => {
@@ -32,6 +49,28 @@ export default function Onboarding() {
       setLocation('/login');
     }
   }, [user, authLoading, setLocation]);
+
+  // Prefill credentials the user already saved, so a reconnect does not start from scratch.
+  useEffect(() => {
+    if (!user) return;
+    let active = true;
+
+    supabase
+      .from('users')
+      .select('telegram_api_id, telegram_api_hash, telegram_phone')
+      .eq('id', user.id)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (!active || !data) return;
+        if (data.telegram_api_id) setApiId(data.telegram_api_id);
+        if (data.telegram_api_hash) setApiHash(data.telegram_api_hash);
+        if (data.telegram_phone) setPhone(data.telegram_phone);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [user]);
 
   if (authLoading) {
     return (
@@ -46,14 +85,10 @@ export default function Onboarding() {
       setError('يرجى إدخال API ID و API Hash');
       return;
     }
-
-    // Validate API ID is numeric
     if (!/^\d+$/.test(apiId.trim())) {
       setError('API ID يجب أن يكون رقماً');
       return;
     }
-
-    // Validate API Hash format
     if (apiHash.trim().length < 32) {
       setError('API Hash يجب أن يكون على الأقل 32 حرفاً');
       return;
@@ -86,12 +121,6 @@ export default function Onboarding() {
   };
 
   const handleSendOTP = async () => {
-    if (!phone.trim()) {
-      setError('يرجى إدخال رقم الهاتف');
-      return;
-    }
-
-    // Validate phone format (basic validation)
     if (!/^\+\d{10,15}$/.test(phone.trim())) {
       setError('يرجى إدخال رقم هاتف صحيح بصيغة دولية (مثل +966500000000)');
       return;
@@ -100,60 +129,34 @@ export default function Onboarding() {
     try {
       setLoading(true);
       setError(null);
+      setOtp('');
 
-      // Call Edge Function to send OTP
-      const { data, error: otpError } = await supabase.functions.invoke('telegram-auth', {
-        body: {
-          action: 'send-otp',
-          phone: phone.trim(),
-          apiId: apiId.trim(),
-          apiHash: apiHash.trim()
-        }
+      const data = await callTelegramAuth<SendOtpResult>({
+        action: 'send-otp',
+        phone: phone.trim(),
+        apiId: apiId.trim(),
+        apiHash: apiHash.trim(),
       });
 
-      if (otpError) {
-        console.error('OTP Error:', otpError);
-        // Check if it's a function not found error
-        if (otpError.message?.includes('Function not found') || otpError.message?.includes('404')) {
-          throw new Error('خدمة التحقق غير متاحة حالياً. يرجى التأكد من نشر Edge Function.');
-        }
-        // Try to extract error message from various possible locations
-        let errorMsg = 'فشل في إرسال الرمز';
-        if (otpError.message) {
-          errorMsg = otpError.message;
-        } else if (otpError.error?.message) {
-          errorMsg = otpError.error.message;
-        } else if (typeof otpError === 'string') {
-          errorMsg = otpError;
-        }
-        throw new Error(errorMsg);
-      }
-
-      if (data?.error) {
-        throw new Error(data.error);
-      }
-
-      if (data?.phoneCodeHash && data?.sessionId) {
-        setPhoneCodeHash(data.phoneCodeHash);
-        setSessionId(data.sessionId);
-        setOtpSent(true);
-        toast.success('تم إرسال رمز التحقق إلى حسابك في Telegram');
-        setStep('otp-verify');
-      } else {
-        throw new Error('فشل في إرسال رمز التحقق: لم يتم استلام phoneCodeHash أو sessionId');
-      }
+      setSessionId(data.sessionId);
+      setOtpLength(data.codeLength ?? DEFAULT_OTP_LENGTH);
+      toast.success(
+        data.codeType === 'sms'
+          ? 'تم إرسال رمز التحقق برسالة نصية'
+          : 'تم إرسال رمز التحقق إلى تطبيق Telegram',
+      );
+      setStep('otp-verify');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'خطأ في إرسال الرمز';
       setError(message);
       toast.error(message);
-      console.error('Send OTP error:', err);
     } finally {
       setLoading(false);
     }
   };
 
   const handleVerifyOTP = async () => {
-    if (!otp.trim() || otp.length < 5) {
+    if (otp.trim().length < otpLength) {
       setError('يرجى إدخال رمز التحقق الكامل');
       return;
     }
@@ -162,51 +165,26 @@ export default function Onboarding() {
       setLoading(true);
       setError(null);
 
-      const { data, error: verifyError } = await supabase.functions.invoke('telegram-auth', {
-        body: {
-          action: 'verify-otp',
-          code: otp.trim(),
-          phoneCodeHash: phoneCodeHash,
-          sessionId: sessionId
-        }
+      const data = await callTelegramAuth<VerifyOtpResult>({
+        action: 'verify-otp',
+        sessionId,
+        code: otp.trim(),
       });
 
-      if (verifyError) {
-        console.error('Verify Error:', verifyError);
-        // Try to extract error message from various possible locations
-        let errorMsg = 'فشل التحقق من الرمز';
-        if (verifyError.message) {
-          errorMsg = verifyError.message;
-        } else if (verifyError.error?.message) {
-          errorMsg = verifyError.error.message;
-        } else if (typeof verifyError === 'string') {
-          errorMsg = verifyError;
-        }
-        throw new Error(errorMsg);
-      }
-
-      if (data?.error) {
-        throw new Error(data.error);
-      }
-
-      // Check if 2FA password is required
-      if (data?.requiresPassword) {
-        console.log('[ONBOARDING] 2FA password required');
-        setSessionString(data.sessionString);
-        setPasswordHint(data.passwordHint || 'أدخل كلمة المرور الخاصة بك');
-        toast.info('يتطلب حسابك التحقق بخطوتين. يرجى إدخال كلمة المرور.');
-        setStep('password-verify');
-      } else if (data?.success) {
-        toast.success('تم التحقق بنجاح وإنشاء الجلسة');
+      if (data.success) {
+        toast.success('تم ربط حساب Telegram بنجاح');
         setStep('complete');
-      } else {
-        throw new Error('فشل التحقق من الرمز: لم يتم استلام حالة النجاح');
+        return;
       }
+
+      // Account is protected by Two-Step Verification.
+      setPasswordHint(data.passwordHint);
+      toast.info('حسابك محمي بالتحقق بخطوتين. أدخل كلمة المرور للمتابعة.');
+      setStep('password-verify');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'رمز التحقق غير صحيح';
       setError(message);
       toast.error(message);
-      console.error('Verify OTP error:', err);
     } finally {
       setLoading(false);
     }
@@ -222,96 +200,60 @@ export default function Onboarding() {
       setLoading(true);
       setError(null);
 
-      const { data, error: verifyError } = await supabase.functions.invoke('telegram-auth', {
-        body: {
-          action: 'verify-password',
-          password: password.trim(),
-          phoneCodeHash: phoneCodeHash,
-          sessionString: sessionString
-        }
+      await callTelegramAuth<VerifyPasswordResult>({
+        action: 'verify-password',
+        sessionId,
+        password,
       });
 
-      if (verifyError) {
-        console.error('Password Verify Error:', verifyError);
-        let errorMsg = 'فشل التحقق من كلمة المرور';
-        if (verifyError.message) {
-          errorMsg = verifyError.message;
-        } else if (verifyError.error?.message) {
-          errorMsg = verifyError.error.message;
-        } else if (typeof verifyError === 'string') {
-          errorMsg = verifyError;
-        }
-        throw new Error(errorMsg);
-      }
-
-      if (data?.error) {
-        throw new Error(data.error);
-      }
-
-      if (data?.success) {
-        toast.success('تم التحقق من كلمة المرور بنجاح وإنشاء الجلسة');
-        setStep('complete');
-      } else {
-        throw new Error('فشل التحقق من كلمة المرور');
-      }
+      toast.success('تم ربط حساب Telegram بنجاح');
+      setStep('complete');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'كلمة المرور غير صحيحة';
       setError(message);
       toast.error(message);
-      console.error('Verify password error:', err);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleComplete = () => {
-    setLocation('/dashboard');
-  };
-
-  const handleResendOTP = () => {
+  /** Abandons the current attempt and returns to the phone step for a fresh code. */
+  const handleRestartVerification = () => {
     setOtp('');
     setPassword('');
     setError(null);
-    setOtpSent(false);
     setSessionId('');
-    setSessionString('');
-    setPhoneCodeHash('');
     setPasswordHint(null);
     setStep('phone-input');
   };
 
+  const currentIndex = STEPS.indexOf(step);
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-white via-blue-50 to-white">
       <div className="container max-w-2xl mx-auto py-12 px-4">
-        {/* Header */}
         <div className="text-center mb-12">
           <h1 className="text-4xl font-bold text-gray-900 mb-2 font-display">
             إعداد Telegram Notifier
           </h1>
-          <p className="text-gray-600">
-            اتبع الخطوات البسيطة لبدء مراقبة إشاراتك
-          </p>
+          <p className="text-gray-600">اتبع الخطوات البسيطة لبدء مراقبة إشاراتك</p>
         </div>
 
         {/* Progress indicator */}
         <div className="flex justify-between mb-12 overflow-x-auto">
-          {(['welcome', 'telegram-setup', 'credentials', 'phone-input', 'otp-verify', 'password-verify', 'complete'] as const).map((s, i) => (
+          {STEPS.map((s, i) => (
             <div key={s} className="flex-1 flex items-center min-w-max">
               <div
                 className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold transition-all ${
-                  step === s || (step === 'complete' && i < 6) || (i < ['welcome', 'telegram-setup', 'credentials', 'phone-input', 'otp-verify', 'password-verify', 'complete'].indexOf(step))
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-gray-200 text-gray-600'
+                  i <= currentIndex ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600'
                 }`}
               >
                 {i + 1}
               </div>
-              {i < 6 && (
+              {i < STEPS.length - 1 && (
                 <div
                   className={`flex-1 h-1 mx-1 transition-all min-w-[20px] ${
-                    (step === 'complete' || i < ['welcome', 'telegram-setup', 'credentials', 'phone-input', 'otp-verify', 'password-verify', 'complete'].indexOf(step))
-                      ? 'bg-blue-600'
-                      : 'bg-gray-200'
+                    i < currentIndex ? 'bg-blue-600' : 'bg-gray-200'
                   }`}
                 ></div>
               )}
@@ -319,16 +261,14 @@ export default function Onboarding() {
           ))}
         </div>
 
-        {/* Content */}
         <div className="bg-white rounded-2xl shadow-lg p-8 border border-gray-100">
           {step === 'welcome' && (
             <div className="space-y-6">
               <div>
-                <h2 className="text-2xl font-bold text-gray-900 mb-2 font-display">
-                  مرحباً بك!
-                </h2>
+                <h2 className="text-2xl font-bold text-gray-900 mb-2 font-display">مرحباً بك!</h2>
                 <p className="text-gray-600">
-                  سنساعدك في إعداد تطبيق Telegram لمراقبة الإشارات والردود. العملية بسيطة وتستغرق بضع دقائق فقط.
+                  سنساعدك في إعداد تطبيق Telegram لمراقبة الإشارات والردود. العملية بسيطة وتستغرق بضع
+                  دقائق فقط.
                 </p>
               </div>
 
@@ -358,65 +298,23 @@ export default function Onboarding() {
                 </p>
 
                 <ol className="space-y-4">
-                  <li className="flex gap-4">
-                    <span className="flex-shrink-0 w-8 h-8 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center font-semibold">
-                      1
-                    </span>
-                    <div>
-                      <p className="font-semibold text-gray-900">انتقل إلى my.telegram.org</p>
-                      <p className="text-sm text-gray-600">
-                        افتح الموقع في متصفح جديد واتبع التعليمات
-                      </p>
-                    </div>
-                  </li>
-
-                  <li className="flex gap-4">
-                    <span className="flex-shrink-0 w-8 h-8 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center font-semibold">
-                      2
-                    </span>
-                    <div>
-                      <p className="font-semibold text-gray-900">قم بتسجيل الدخول برقم هاتفك</p>
-                      <p className="text-sm text-gray-600">
-                        استخدم نفس رقم الهاتف المرتبط بحسابك على Telegram
-                      </p>
-                    </div>
-                  </li>
-
-                  <li className="flex gap-4">
-                    <span className="flex-shrink-0 w-8 h-8 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center font-semibold">
-                      3
-                    </span>
-                    <div>
-                      <p className="font-semibold text-gray-900">انقر على "API development tools"</p>
-                      <p className="text-sm text-gray-600">
-                        ستجد هذا الخيار في القائمة الرئيسية
-                      </p>
-                    </div>
-                  </li>
-
-                  <li className="flex gap-4">
-                    <span className="flex-shrink-0 w-8 h-8 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center font-semibold">
-                      4
-                    </span>
-                    <div>
-                      <p className="font-semibold text-gray-900">أنشئ تطبيقاً جديداً</p>
-                      <p className="text-sm text-gray-600">
-                        ملأ النموذج وسيحصل على API ID و API Hash
-                      </p>
-                    </div>
-                  </li>
-
-                  <li className="flex gap-4">
-                    <span className="flex-shrink-0 w-8 h-8 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center font-semibold">
-                      5
-                    </span>
-                    <div>
-                      <p className="font-semibold text-gray-900">انسخ البيانات وعد هنا</p>
-                      <p className="text-sm text-gray-600">
-                        ستحتاج إلى API ID و API Hash في الخطوة التالية
-                      </p>
-                    </div>
-                  </li>
+                  {[
+                    ['انتقل إلى my.telegram.org', 'افتح الموقع في متصفح جديد واتبع التعليمات'],
+                    ['قم بتسجيل الدخول برقم هاتفك', 'استخدم نفس رقم الهاتف المرتبط بحسابك على Telegram'],
+                    ['انقر على "API development tools"', 'ستجد هذا الخيار في القائمة الرئيسية'],
+                    ['أنشئ تطبيقاً جديداً', 'املأ النموذج وستحصل على API ID و API Hash'],
+                    ['انسخ البيانات وعد هنا', 'ستحتاج إلى API ID و API Hash في الخطوة التالية'],
+                  ].map(([title, detail], i) => (
+                    <li key={title} className="flex gap-4">
+                      <span className="flex-shrink-0 w-8 h-8 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center font-semibold">
+                        {i + 1}
+                      </span>
+                      <div>
+                        <p className="font-semibold text-gray-900">{title}</p>
+                        <p className="text-sm text-gray-600">{detail}</p>
+                      </div>
+                    </li>
+                  ))}
                 </ol>
               </div>
 
@@ -434,9 +332,7 @@ export default function Onboarding() {
                   rel="noopener noreferrer"
                   className="flex-1"
                 >
-                  <Button
-                    className="w-full h-12 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl flex items-center justify-center gap-2"
-                  >
+                  <Button className="w-full h-12 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl flex items-center justify-center gap-2">
                     افتح my.telegram.org
                     <ExternalLink className="w-4 h-4" />
                   </Button>
@@ -471,7 +367,7 @@ export default function Onboarding() {
               )}
 
               <div>
-                <label className="block text-sm font-semibold text-gray-900 mb-2 flex items-center gap-2">
+                <label className="text-sm font-semibold text-gray-900 mb-2 flex items-center gap-2">
                   <Key className="w-4 h-4" />
                   API ID
                 </label>
@@ -482,11 +378,12 @@ export default function Onboarding() {
                   placeholder="مثال: 1234567"
                   className="h-12 rounded-xl border-gray-300"
                   disabled={loading}
+                  dir="ltr"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-semibold text-gray-900 mb-2 flex items-center gap-2">
+                <label className="text-sm font-semibold text-gray-900 mb-2 flex items-center gap-2">
                   <Lock className="w-4 h-4" />
                   API Hash
                 </label>
@@ -497,6 +394,7 @@ export default function Onboarding() {
                   placeholder="مثال: abcdef1234567890abcdef1234567890"
                   className="h-12 rounded-xl border-gray-300"
                   disabled={loading}
+                  dir="ltr"
                 />
               </div>
 
@@ -530,9 +428,7 @@ export default function Onboarding() {
           {step === 'phone-input' && (
             <div className="space-y-6">
               <div>
-                <h2 className="text-2xl font-bold text-gray-900 mb-2 font-display">
-                  رقم الهاتف
-                </h2>
+                <h2 className="text-2xl font-bold text-gray-900 mb-2 font-display">رقم الهاتف</h2>
                 <p className="text-gray-600 mb-4">
                   أدخل رقم هاتفك المرتبط بحساب Telegram (بصيغة دولية، مثل +966500000000)
                 </p>
@@ -546,7 +442,7 @@ export default function Onboarding() {
               )}
 
               <div>
-                <label className="block text-sm font-semibold text-gray-900 mb-2 flex items-center gap-2">
+                <label className="text-sm font-semibold text-gray-900 mb-2 flex items-center gap-2">
                   <Phone className="w-4 h-4" />
                   رقم الهاتف
                 </label>
@@ -563,7 +459,7 @@ export default function Onboarding() {
 
               <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
                 <p className="text-sm text-blue-900">
-                  <strong>تلميح:</strong> استخدم الصيغة الدولية الكاملة مع رمز الدولة (مثل +966 للسعودية)
+                  <strong>تلميح:</strong> سيصلك الرمز داخل تطبيق Telegram نفسه، وليس كرسالة SMS.
                 </p>
               </div>
 
@@ -601,7 +497,7 @@ export default function Onboarding() {
                   التحقق من الرمز
                 </h2>
                 <p className="text-gray-600 mb-4">
-                  أدخل الرمز الذي وصلك في تطبيق Telegram (5-6 أرقام)
+                  أدخل الرمز المكوّن من {otpLength} أرقام الذي وصلك في تطبيق Telegram
                 </p>
               </div>
 
@@ -613,42 +509,31 @@ export default function Onboarding() {
               )}
 
               <div>
-                <label className="block text-sm font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                <label className="text-sm font-semibold text-gray-900 mb-4 flex items-center gap-2">
                   <Lock className="w-4 h-4" />
-                  رمز التحقق (OTP)
+                  رمز التحقق
                 </label>
-                <div className="flex justify-center mb-6">
-                  <InputOTP
-                    maxLength={6}
-                    value={otp}
-                    onChange={setOtp}
-                    disabled={loading}
-                  >
+                <div className="flex justify-center mb-6" dir="ltr">
+                  <InputOTP maxLength={otpLength} value={otp} onChange={setOtp} disabled={loading}>
                     <InputOTPGroup>
-                      <InputOTPSlot index={0} />
-                      <InputOTPSlot index={1} />
-                      <InputOTPSlot index={2} />
-                    </InputOTPGroup>
-                    <InputOTPSlot index={3} />
-                    <InputOTPGroup>
-                      <InputOTPSlot index={4} />
-                      <InputOTPSlot index={5} />
+                      {Array.from({ length: otpLength }, (_, i) => (
+                        <InputOTPSlot key={i} index={i} />
+                      ))}
                     </InputOTPGroup>
                   </InputOTP>
                 </div>
               </div>
 
-              {otpSent && (
-                <div className="bg-green-50 border border-green-200 rounded-xl p-4">
-                  <p className="text-sm text-green-900">
-                    <strong>تم إرسال الرمز:</strong> تحقق من تطبيق Telegram للحصول على رمز التحقق
-                  </p>
-                </div>
-              )}
+              <div className="bg-green-50 border border-green-200 rounded-xl p-4">
+                <p className="text-sm text-green-900">
+                  <strong>تم إرسال الرمز:</strong> افتح تطبيق Telegram على أي جهاز آخر لتجد الرمز في
+                  محادثة Telegram الرسمية.
+                </p>
+              </div>
 
               <div className="flex gap-3">
                 <Button
-                  onClick={handleResendOTP}
+                  onClick={handleRestartVerification}
                   variant="outline"
                   className="flex-1 h-12 rounded-xl"
                   disabled={loading}
@@ -657,7 +542,7 @@ export default function Onboarding() {
                 </Button>
                 <Button
                   onClick={handleVerifyOTP}
-                  disabled={loading || otp.length < 5}
+                  disabled={loading || otp.length < otpLength}
                   className="flex-1 h-12 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl flex items-center justify-center gap-2"
                 >
                   {loading ? (
@@ -694,13 +579,13 @@ export default function Onboarding() {
               {passwordHint && (
                 <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
                   <p className="text-sm text-blue-900">
-                    <strong>تلميح:</strong> {passwordHint}
+                    <strong>تلميح كلمة المرور من Telegram:</strong> {passwordHint}
                   </p>
                 </div>
               )}
 
               <div>
-                <label className="block text-sm font-semibold text-gray-900 mb-2 flex items-center gap-2">
+                <label className="text-sm font-semibold text-gray-900 mb-2 flex items-center gap-2">
                   <Lock className="w-4 h-4" />
                   كلمة المرور
                 </label>
@@ -716,12 +601,12 @@ export default function Onboarding() {
 
               <div className="flex gap-3">
                 <Button
-                  onClick={handleResendOTP}
+                  onClick={handleRestartVerification}
                   variant="outline"
                   className="flex-1 h-12 rounded-xl"
                   disabled={loading}
                 >
-                  رجوع
+                  البدء من جديد
                 </Button>
                 <Button
                   onClick={handleVerifyPassword}
@@ -754,12 +639,13 @@ export default function Onboarding() {
                   تم الإعداد بنجاح!
                 </h2>
                 <p className="text-gray-600">
-                  تم ربط حسابك على Telegram بنجاح. سيبدأ النظام الآن بمراقبة الإشارات والردود كل 5 دقائق.
+                  تم ربط حسابك على Telegram بنجاح. سيبدأ النظام الآن بمراقبة الإشارات والردود كل 5
+                  دقائق.
                 </p>
               </div>
 
               <Button
-                onClick={handleComplete}
+                onClick={() => setLocation('/dashboard')}
                 className="w-full h-12 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl"
               >
                 انتقل إلى لوحة التحكم

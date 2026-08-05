@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useLocation } from 'wouter';
 import { useAuth } from '@/hooks/useAuth';
+import { useOnboardingStatus } from '@/hooks/useOnboardingStatus';
 import { supabase } from '@/lib/supabase';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
@@ -19,6 +20,7 @@ interface Notification {
 
 export default function Dashboard() {
   const { user, loading: authLoading, signOut } = useAuth();
+  const { state: onboarding } = useOnboardingStatus(user?.id);
   const [, setLocation] = useLocation();
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
@@ -30,6 +32,13 @@ export default function Dashboard() {
       setLocation('/login');
     }
   }, [user, authLoading, setLocation]);
+
+  // The dashboard is meaningless without a linked Telegram account.
+  useEffect(() => {
+    if (user && onboarding === 'incomplete') {
+      setLocation('/onboarding');
+    }
+  }, [user, onboarding, setLocation]);
 
   useEffect(() => {
     if (user) {
@@ -91,7 +100,7 @@ export default function Dashboard() {
         .from('users')
         .select('monitoring_enabled')
         .eq('id', user.id)
-        .single();
+        .maybeSingle();
 
       if (error) throw error;
       setMonitoringEnabled(data?.monitoring_enabled || false);

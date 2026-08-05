@@ -1,705 +1,454 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
+/**
+ * telegram-auth — real Telegram (MTProto) login for the onboarding flow.
+ *
+ * Actions:
+ *   send-otp        { phone, apiId, apiHash }        -> { sessionId, phoneCodeHash, codeType, codeLength, timeout }
+ *   verify-otp      { sessionId, code }              -> { success } | { requiresPassword, passwordHint }
+ *   verify-password { sessionId, password }          -> { success }
+ *
+ * The MTProto auth key created by `send-otp` MUST be reused by `verify-otp`, because the
+ * phone_code_hash Telegram returns is bound to it. Edge Function invocations do not share
+ * memory, so the intermediate mtcute session is persisted in `otp_sessions.session_string`.
+ *
+ * On success the session is converted to a Telethon v1 string session and stored in
+ * `telegram_sessions.session_data`, which is the format `server/workers/telegram_worker.py`
+ * (Telethon) reads.
+ */
+import { TelegramClient } from 'jsr:@mtcute/web@0.31.0'
+import { MemoryStorage } from 'jsr:@mtcute/core@0.31.0'
+import { readStringSession } from 'jsr:@mtcute/core@0.31.0/utils.js'
+import { convertToTelethonSession } from 'jsr:@mtcute/convert@0.31.0'
+import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
 
-// Store for active client connections and OTP codes
-const activeClients = new Map<string, { 
-  phoneCodeHash: string
-  phone: string
-  expectedCode?: string
-  codeAttempts: number
-  createdAt: number
-  sessionString?: string
-  authState?: 'pending_otp' | 'pending_password' | 'completed'
-  passwordHint?: string
-}>()
+/** OTP sessions older than this are rejected and cleaned up. */
+const SESSION_TTL_MS = 15 * 60 * 1000
+/** Minimum gap between two send-otp calls for the same user. */
+const RESEND_COOLDOWN_MS = 60 * 1000
 
-function generateRandomString(length: number): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
-  let result = ''
-  for (let i = 0; i < length; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length))
-  }
-  return result
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    status,
+  })
 }
 
-async function handleSendOtp(
-  req: any,
-  supabaseClient: any,
-  user: any,
-  body: any
-): Promise<Response> {
-  console.log('[SEND-OTP] Starting OTP send process')
-  console.log('[SEND-OTP] Body received:', JSON.stringify(body))
-  
-  const { phone, apiId, apiHash } = body
+/**
+ * Maps Telegram's RPC error names to Arabic messages for the UI.
+ * Unknown errors fall through to their raw name so nothing is silently swallowed.
+ */
+const TELEGRAM_ERRORS: Record<string, string> = {
+  PHONE_NUMBER_INVALID: 'رقم الهاتف غير صحيح. تأكد من كتابته بالصيغة الدولية.',
+  PHONE_NUMBER_BANNED: 'هذا الرقم محظور من Telegram.',
+  PHONE_NUMBER_FLOOD: 'تم طلب عدد كبير من الرموز لهذا الرقم. حاول بعد فترة.',
+  PHONE_CODE_INVALID: 'رمز التحقق غير صحيح.',
+  PHONE_CODE_EXPIRED: 'انتهت صلاحية رمز التحقق. اطلب رمزاً جديداً.',
+  PHONE_CODE_EMPTY: 'لم يتم إدخال رمز التحقق.',
+  PHONE_PASSWORD_FLOOD: 'محاولات كثيرة لكلمة المرور. حاول لاحقاً.',
+  PASSWORD_HASH_INVALID: 'كلمة المرور غير صحيحة.',
+  API_ID_INVALID: 'API ID أو API Hash غير صحيح. راجع بياناتك من my.telegram.org.',
+  API_ID_PUBLISHED_FLOOD: 'بيانات API مستخدمة بكثرة. أنشئ تطبيقاً جديداً على my.telegram.org.',
+  AUTH_RESTART: 'تحتاج إعادة بدء عملية التحقق. اطلب رمزاً جديداً.',
+  SESSION_PASSWORD_NEEDED: 'الحساب محمي بالتحقق بخطوتين.',
+  PHONE_NUMBER_UNOCCUPIED: 'لا يوجد حساب Telegram مرتبط بهذا الرقم.',
+  SIGN_IN_FAILED: 'فشل تسجيل الدخول إلى Telegram. حاول مرة أخرى.',
+}
 
-  // Validate inputs
-  if (!phone || !apiId || !apiHash) {
-    console.error('[SEND-OTP] Missing required fields:', { phone: !!phone, apiId: !!apiId, apiHash: !!apiHash })
-    return new Response(
-      JSON.stringify({ 
-        error: 'Missing required fields: phone, apiId, apiHash',
-        received: { phone: !!phone, apiId: !!apiId, apiHash: !!apiHash }
-      }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-    )
+/** Extracts Telegram's error name (e.g. PHONE_CODE_INVALID) from an mtcute RpcError. */
+function telegramErrorName(err: unknown): string | null {
+  const raw =
+    (err as { text?: string })?.text ??
+    (err as { message?: string })?.message ??
+    ''
+  const match = String(raw).match(/[A-Z][A-Z0-9_]{3,}/)
+  return match ? match[0] : null
+}
+
+function describeError(err: unknown, fallback: string): { name: string | null; message: string } {
+  const name = telegramErrorName(err)
+  if (name && TELEGRAM_ERRORS[name]) return { name, message: TELEGRAM_ERRORS[name] }
+  if (name?.startsWith('FLOOD_WAIT')) {
+    const seconds = String((err as { message?: string })?.message ?? '').match(/\d+/)?.[0]
+    return {
+      name,
+      message: seconds
+        ? `Telegram يطلب الانتظار ${seconds} ثانية قبل المحاولة مرة أخرى.`
+        : 'Telegram يطلب الانتظار قبل المحاولة مرة أخرى.',
+    }
   }
+  const detail = err instanceof Error ? err.message : String(err)
+  return { name, message: `${fallback} (${detail})` }
+}
 
-  // Validate phone format
-  if (!/^\+\d{10,15}$/.test(phone)) {
-    console.error('[SEND-OTP] Invalid phone format:', phone)
-    return new Response(
-      JSON.stringify({ error: 'Invalid phone number format. Use international format like +966500000000' }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-    )
-  }
+function newClient(apiId: number, apiHash: string): TelegramClient {
+  return new TelegramClient({
+    apiId,
+    apiHash,
+    storage: new MemoryStorage(),
+    // The edge runtime has no persistent filesystem and updates are handled by the
+    // Python worker, so there is nothing to catch up on here.
+    disableUpdates: true,
+  })
+}
 
-  // Validate API ID
-  const apiIdNum = parseInt(apiId)
-  if (isNaN(apiIdNum) || apiIdNum <= 0) {
-    console.error('[SEND-OTP] Invalid API ID:', apiId)
-    return new Response(
-      JSON.stringify({ error: 'Invalid API ID. Must be a positive number' }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-    )
-  }
-
-  // Validate API Hash
-  if (!apiHash || apiHash.length < 32) {
-    console.error('[SEND-OTP] Invalid API Hash length:', apiHash?.length)
-    return new Response(
-      JSON.stringify({ error: 'Invalid API Hash. Must be at least 32 characters' }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-    )
-  }
-
+async function shutdown(client: TelegramClient | null): Promise<void> {
+  if (!client) return
   try {
-    // Generate a real OTP code (5-6 digits)
-    const otpCode = Math.floor(Math.random() * 900000) + 100000
-    const phoneCodeHash = generateRandomString(32)
-    const sessionId = `${Date.now()}_${generateRandomString(12)}`
+    await client.destroy()
+  } catch {
+    // Closing a socket that Telegram already dropped is not an error worth surfacing.
+  }
+}
 
-    console.log('[SEND-OTP] Generated OTP:', otpCode, 'for phone:', phone)
+/**
+ * Turns a signed-in mtcute client into a Telethon-compatible string session and
+ * records it as the user's active Telegram session.
+ */
+async function persistSession(
+  supabase: SupabaseClient,
+  client: TelegramClient,
+  otpSession: { id: string; user_id: string; phone_number: string; api_id: number; api_hash: string },
+): Promise<Response> {
+  const mtcuteSession = await client.exportSession()
+  const telethonSession = convertToTelethonSession(readStringSession(mtcuteSession))
 
-    // Store OTP session in Supabase
-    console.log('[SEND-OTP] Storing OTP session in database...')
-    const { data: insertedData, error: insertError } = await supabaseClient
+  const { error: sessionError } = await supabase.from('telegram_sessions').upsert(
+    {
+      user_id: otpSession.user_id,
+      session_data: telethonSession,
+      phone: otpSession.phone_number,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'user_id' },
+  )
+  if (sessionError) {
+    console.error('[PERSIST] Failed to store telegram session:', sessionError)
+    return json({ error: `تعذر حفظ جلسة Telegram: ${sessionError.message}` }, 500)
+  }
+
+  const { error: userError } = await supabase
+    .from('users')
+    .update({
+      telegram_phone: otpSession.phone_number,
+      telegram_api_id: String(otpSession.api_id),
+      telegram_api_hash: otpSession.api_hash,
+      monitoring_enabled: true,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', otpSession.user_id)
+  if (userError) {
+    console.error('[PERSIST] Failed to update user settings:', userError)
+    return json({ error: `تعذر تحديث إعدادات المستخدم: ${userError.message}` }, 500)
+  }
+
+  // The OTP session has served its purpose; it holds an auth key so it must not linger.
+  await supabase.from('otp_sessions').delete().eq('id', otpSession.id)
+
+  console.log('[PERSIST] Session stored for user', otpSession.user_id)
+  return json({ success: true, phone: otpSession.phone_number })
+}
+
+/** Loads the pending OTP session for this user and rejects stale or foreign rows. */
+async function loadOtpSession(
+  supabase: SupabaseClient,
+  userId: string,
+  sessionId: string,
+  expectedState: 'pending_otp' | 'pending_password',
+) {
+  const { data, error } = await supabase
+    .from('otp_sessions')
+    .select('*')
+    .eq('id', sessionId)
+    .eq('user_id', userId)
+    .maybeSingle()
+
+  if (error) {
+    console.error('[SESSION] Lookup failed:', error)
+    return { error: json({ error: `تعذر قراءة جلسة التحقق: ${error.message}` }, 500) }
+  }
+  if (!data) {
+    return { error: json({ error: 'جلسة التحقق غير موجودة. اطلب رمزاً جديداً.' }, 400) }
+  }
+  if (Date.now() - new Date(data.created_at).getTime() > SESSION_TTL_MS) {
+    await supabase.from('otp_sessions').delete().eq('id', data.id)
+    return { error: json({ error: 'انتهت صلاحية جلسة التحقق. اطلب رمزاً جديداً.' }, 400) }
+  }
+  if (data.auth_state !== expectedState) {
+    return {
+      error: json({ error: 'حالة التحقق غير متوقعة. اطلب رمزاً جديداً.', authState: data.auth_state }, 400),
+    }
+  }
+  if (!data.session_string) {
+    return { error: json({ error: 'جلسة التحقق غير مكتملة. اطلب رمزاً جديداً.' }, 400) }
+  }
+  return { data }
+}
+
+async function handleSendOtp(supabase: SupabaseClient, userId: string, body: Record<string, unknown>) {
+  const phone = String(body.phone ?? '').trim()
+  const apiIdRaw = String(body.apiId ?? '').trim()
+  const apiHash = String(body.apiHash ?? '').trim()
+
+  if (!phone || !apiIdRaw || !apiHash) {
+    return json({ error: 'الحقول المطلوبة ناقصة: phone و apiId و apiHash' }, 400)
+  }
+  if (!/^\+\d{10,15}$/.test(phone)) {
+    return json({ error: 'صيغة رقم الهاتف غير صحيحة. استخدم الصيغة الدولية مثل ‎+966500000000' }, 400)
+  }
+  const apiId = Number.parseInt(apiIdRaw, 10)
+  if (!Number.isInteger(apiId) || apiId <= 0) {
+    return json({ error: 'API ID يجب أن يكون رقماً صحيحاً موجباً' }, 400)
+  }
+  if (apiHash.length < 32) {
+    return json({ error: 'API Hash يجب أن يكون 32 حرفاً على الأقل' }, 400)
+  }
+
+  // Throttle resends so a stuck UI cannot hammer Telegram into a FLOOD_WAIT.
+  const { data: recent } = await supabase
+    .from('otp_sessions')
+    .select('created_at')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+  const lastSentAt = recent?.[0]?.created_at
+  if (lastSentAt) {
+    const elapsed = Date.now() - new Date(lastSentAt).getTime()
+    if (elapsed < RESEND_COOLDOWN_MS) {
+      const wait = Math.ceil((RESEND_COOLDOWN_MS - elapsed) / 1000)
+      return json({ error: `انتظر ${wait} ثانية قبل طلب رمز جديد.`, retryAfter: wait }, 429)
+    }
+  }
+
+  let client: TelegramClient | null = null
+  try {
+    client = newClient(apiId, apiHash)
+    await client.connect()
+
+    console.log('[SEND-OTP] Requesting code for', phone)
+    const sent = await client.sendCode({ phone })
+
+    // sendCode resolves to a User when the account was already authorised, in which
+    // case there is no code to verify and no phoneCodeHash to hand back.
+    if (typeof (sent as { phoneCodeHash?: unknown }).phoneCodeHash !== 'string') {
+      return json({ error: 'تعذر إرسال رمز التحقق. ابدأ العملية من جديد.' }, 400)
+    }
+
+    const mtcuteSession = await client.exportSession()
+
+    // Only one pending attempt per user; the previous auth key is useless now.
+    await supabase.from('otp_sessions').delete().eq('user_id', userId)
+
+    const { data: inserted, error: insertError } = await supabase
       .from('otp_sessions')
       .insert({
-        user_id: user.id,
+        user_id: userId,
         phone_number: phone,
-        api_id: apiIdNum,
+        api_id: apiId,
         api_hash: apiHash,
-        phone_code_hash: phoneCodeHash,
+        phone_code_hash: sent.phoneCodeHash,
+        session_string: mtcuteSession,
         auth_state: 'pending_otp',
       })
-      .select()
+      .select('id')
+      .single()
 
-    if (insertError) {
-      console.error('[SEND-OTP] Database insert error:', insertError)
-      return new Response(
-        JSON.stringify({ 
-          error: `Failed to store OTP session: ${insertError.message}`,
-          details: insertError
-        }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
-      )
+    if (insertError || !inserted) {
+      console.error('[SEND-OTP] Insert failed:', insertError)
+      return json({ error: `تعذر حفظ جلسة التحقق: ${insertError?.message ?? 'unknown'}` }, 500)
     }
 
-    console.log('[SEND-OTP] Database insert successful:', insertedData)
-
-    // Store client data with the real OTP code
-    activeClients.set(sessionId, {
-      phoneCodeHash,
-      phone,
-      expectedCode: otpCode.toString(),
-      codeAttempts: 0,
-      createdAt: Date.now(),
-      authState: 'pending_otp'
+    console.log('[SEND-OTP] Code sent via', sent.type, '- session', inserted.id)
+    return json({
+      success: true,
+      sessionId: inserted.id,
+      phoneCodeHash: sent.phoneCodeHash,
+      // `type` is a delivery-channel string ('app' | 'sms' | ...); the digit count is
+      // a separate property, so the UI can size the code input correctly.
+      codeType: sent.type,
+      codeLength: sent.length,
+      timeout: sent.timeout,
     })
-
-    console.log('[SEND-OTP] Client data stored in memory, sessionId:', sessionId)
-
-    // Cleanup after 15 minutes
-    setTimeout(() => {
-      console.log('[SEND-OTP] Cleaning up expired session:', sessionId)
-      activeClients.delete(sessionId)
-    }, 15 * 60 * 1000)
-
-    console.log('[SEND-OTP] OTP generation successful')
-
-    return new Response(
-      JSON.stringify({
-        success: true,
-        phoneCodeHash: phoneCodeHash,
-        sessionId: sessionId,
-        message: `OTP code sent to ${phone}. Your code is: ${otpCode}. (This is a test environment)`,
-        testOtpCode: otpCode, // For testing purposes
-      }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
-    )
-  } catch (error) {
-    console.error('[SEND-OTP] Unexpected error:', error)
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-    return new Response(
-      JSON.stringify({ error: `Failed to send OTP: ${errorMessage}` }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
-    )
+  } catch (err) {
+    const { name, message } = describeError(err, 'تعذر إرسال رمز التحقق')
+    console.error('[SEND-OTP] Failed:', name, err)
+    return json({ error: message, telegramError: name }, 400)
+  } finally {
+    await shutdown(client)
   }
 }
 
-async function handleVerifyOtp(
-  req: any,
-  supabaseClient: any,
-  user: any,
-  body: any
-): Promise<Response> {
-  console.log('[VERIFY-OTP] Starting OTP verification')
-  console.log('[VERIFY-OTP] Body received:', JSON.stringify(body))
-  
-  const { code, phoneCodeHash, sessionId } = body
+async function handleVerifyOtp(supabase: SupabaseClient, userId: string, body: Record<string, unknown>) {
+  const sessionId = String(body.sessionId ?? '').trim()
+  const code = String(body.code ?? '').trim()
 
-  // Validate inputs
-  if (!code || !phoneCodeHash) {
-    console.error('[VERIFY-OTP] Missing required fields:', { code: !!code, phoneCodeHash: !!phoneCodeHash })
-    return new Response(
-      JSON.stringify({ 
-        error: 'Missing required fields: code, phoneCodeHash',
-        received: { code: !!code, phoneCodeHash: !!phoneCodeHash }
-      }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-    )
+  if (!sessionId || !code) {
+    return json({ error: 'الحقول المطلوبة ناقصة: sessionId و code' }, 400)
+  }
+  if (!/^\d{4,7}$/.test(code)) {
+    return json({ error: 'صيغة الرمز غير صحيحة. أدخل الأرقام التي وصلتك فقط.' }, 400)
   }
 
-  // Verify code format
-  if (!/^\d{5,6}$/.test(code)) {
-    console.error('[VERIFY-OTP] Invalid OTP format:', code)
-    return new Response(
-      JSON.stringify({ error: 'Invalid OTP format. Please enter 5-6 digits.' }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-    )
-  }
+  const loaded = await loadOtpSession(supabase, userId, sessionId, 'pending_otp')
+  if (loaded.error) return loaded.error
+  const otpSession = loaded.data
 
+  let client: TelegramClient | null = null
   try {
-    // Get OTP session from Supabase
-    console.log('[VERIFY-OTP] Fetching OTP session from database...')
-    const { data: otpSession, error: fetchError } = await supabaseClient
-      .from('otp_sessions')
-      .select('*')
-      .eq('phone_code_hash', phoneCodeHash)
-      .eq('user_id', user.id)
-      .single()
+    client = newClient(otpSession.api_id, otpSession.api_hash)
+    await client.importSession(otpSession.session_string)
+    await client.connect()
 
-    if (fetchError || !otpSession) {
-      console.error('[VERIFY-OTP] OTP session not found:', fetchError)
-      return new Response(
-        JSON.stringify({ error: 'Invalid or expired OTP session. Please request a new code.' }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-      )
-    }
+    try {
+      await client.signIn({
+        phone: otpSession.phone_number,
+        phoneCodeHash: otpSession.phone_code_hash,
+        phoneCode: code,
+      })
+    } catch (err) {
+      if (telegramErrorName(err) !== 'SESSION_PASSWORD_NEEDED') throw err
 
-    console.log('[VERIFY-OTP] OTP session found:', otpSession)
-
-    // Check session age (15 minutes)
-    const sessionAge = Date.now() - new Date(otpSession.created_at).getTime()
-    console.log('[VERIFY-OTP] Session age:', sessionAge, 'ms')
-    
-    if (sessionAge > 15 * 60 * 1000) {
-      console.log('[VERIFY-OTP] Session expired, deleting...')
-      await supabaseClient
-        .from('otp_sessions')
-        .delete()
-        .eq('id', otpSession.id)
-      
-      return new Response(
-        JSON.stringify({ error: 'OTP session expired. Please request a new code.' }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-      )
-    }
-
-    // Get stored client data
-    console.log('[VERIFY-OTP] Looking for client data with sessionId:', sessionId)
-    const storedClient = sessionId ? activeClients.get(sessionId) : null
-    
-    if (!storedClient) {
-      console.error('[VERIFY-OTP] Session not found in memory:', sessionId)
-      return new Response(
-        JSON.stringify({ error: 'Session not found. Please request a new OTP code.' }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-      )
-    }
-
-    console.log('[VERIFY-OTP] Client data found, checking code...')
-    console.log('[VERIFY-OTP] Expected code:', storedClient.expectedCode, 'Received code:', code)
-
-    // Check if code matches
-    if (storedClient.expectedCode !== code) {
-      storedClient.codeAttempts++
-      console.log('[VERIFY-OTP] Code mismatch! Attempts:', storedClient.codeAttempts)
-      
-      // Block after 3 failed attempts
-      if (storedClient.codeAttempts >= 3) {
-        console.log('[VERIFY-OTP] Too many attempts, blocking session')
-        activeClients.delete(sessionId)
-        await supabaseClient
-          .from('otp_sessions')
-          .delete()
-          .eq('id', otpSession.id)
-        
-        return new Response(
-          JSON.stringify({ 
-            error: 'Too many failed attempts. Please request a new OTP code.',
-            attemptsRemaining: 0
-          }),
-          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-        )
+      // Account has Two-Step Verification: keep the same auth key for the password step.
+      console.log('[VERIFY-OTP] 2FA required for session', sessionId)
+      let hint: string | null = null
+      try {
+        hint = await client.getPasswordHint()
+      } catch {
+        // A missing hint is not fatal — the UI just shows a generic prompt.
       }
 
-      return new Response(
-        JSON.stringify({ 
-          error: 'Invalid OTP code. Please try again.',
-          attemptsRemaining: 3 - storedClient.codeAttempts
-        }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-      )
-    }
-
-    console.log('[VERIFY-OTP] Code matches!')
-
-    // Check if 2FA password is needed (simulated - in real implementation, this would come from Telegram)
-    // For now, we'll simulate a 50% chance of needing 2FA for testing purposes
-    const needs2FA = Math.random() < 0.1 // 10% chance to simulate 2FA requirement
-    
-    if (needs2FA) {
-      console.log('[VERIFY-OTP] 2FA password required - SESSION_PASSWORD_NEEDED')
-      
-      // Generate temporary session string for password verification
-      const tempSessionString = `temp_session_${generateRandomString(64)}`
-      
-      // Update auth state to pending_password
-      const { error: updateError } = await supabaseClient
+      const pendingSession = await client.exportSession()
+      const { error: updateError } = await supabase
         .from('otp_sessions')
         .update({
           auth_state: 'pending_password',
-          session_string: tempSessionString,
-          password_hint: 'Enter your 2FA password'
+          session_string: pendingSession,
+          password_hint: hint,
         })
         .eq('id', otpSession.id)
 
       if (updateError) {
-        console.error('[VERIFY-OTP] Failed to update auth state:', updateError)
-        return new Response(
-          JSON.stringify({ error: 'Failed to update authentication state' }),
-          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
-        )
+        console.error('[VERIFY-OTP] Failed to save 2FA state:', updateError)
+        return json({ error: `تعذر حفظ حالة التحقق بخطوتين: ${updateError.message}` }, 500)
       }
 
-      // Update client state
-      storedClient.authState = 'pending_password'
-      storedClient.sessionString = tempSessionString
-      storedClient.passwordHint = 'Enter your 2FA password'
-
-      console.log('[VERIFY-OTP] Returning 2FA password requirement')
-
-      return new Response(
-        JSON.stringify({
-          success: false,
-          requiresPassword: true,
-          sessionString: tempSessionString,
-          passwordHint: 'This account has Two-Step Verification enabled. Please enter your password.',
-          message: 'Two-Step Verification password required'
-        }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
-      )
-    }
-
-    console.log('[VERIFY-OTP] No 2FA required, proceeding with session creation...')
-
-    // Code is correct and no 2FA needed! Generate session string
-    const sessionString = `session_${generateRandomString(64)}`
-
-    // Store session in Supabase
-    console.log('[VERIFY-OTP] Storing telegram session...')
-    const { error: sessionError } = await supabaseClient
-      .from('telegram_sessions')
-      .upsert({
-        user_id: user.id,
-        session_data: sessionString,
-        phone: otpSession.phone_number,
-        updated_at: new Date().toISOString()
-      }, {
-        onConflict: 'user_id'
+      return json({
+        success: false,
+        requiresPassword: true,
+        sessionId: otpSession.id,
+        passwordHint: hint,
       })
-
-    if (sessionError) {
-      console.error('[VERIFY-OTP] Session storage error:', sessionError)
-      return new Response(
-        JSON.stringify({ error: `Failed to store session: ${sessionError.message}` }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
-      )
     }
 
-    console.log('[VERIFY-OTP] Telegram session stored successfully')
-
-    // Update user settings
-    console.log('[VERIFY-OTP] Updating user settings...')
-    const { error: updateError } = await supabaseClient
-      .from('users')
-      .update({
-        telegram_phone: otpSession.phone_number,
-        telegram_api_id: otpSession.api_id.toString(),
-        telegram_api_hash: otpSession.api_hash,
-        monitoring_enabled: true,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', user.id)
-
-    if (updateError) {
-      console.error('[VERIFY-OTP] User update error:', updateError)
-      return new Response(
-        JSON.stringify({ error: `Failed to update user settings: ${updateError.message}` }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
-      )
+    console.log('[VERIFY-OTP] Signed in, persisting session', sessionId)
+    return await persistSession(supabase, client, otpSession)
+  } catch (err) {
+    const { name, message } = describeError(err, 'فشل التحقق من الرمز')
+    console.error('[VERIFY-OTP] Failed:', name, err)
+    // An expired or restarted code cannot be retried against the same auth key.
+    if (name === 'PHONE_CODE_EXPIRED' || name === 'AUTH_RESTART') {
+      await supabase.from('otp_sessions').delete().eq('id', otpSession.id)
     }
-
-    console.log('[VERIFY-OTP] User settings updated successfully')
-
-    // Update OTP session to completed
-    await supabaseClient
-      .from('otp_sessions')
-      .update({ auth_state: 'completed' })
-      .eq('id', otpSession.id)
-
-    // Clean up OTP session
-    await supabaseClient
-      .from('otp_sessions')
-      .delete()
-      .eq('id', otpSession.id)
-
-    // Clean up client
-    activeClients.delete(sessionId)
-
-    console.log('[VERIFY-OTP] OTP verification completed successfully')
-
-    return new Response(
-      JSON.stringify({
-        success: true,
-        message: 'OTP verified successfully. Session created and stored.',
-        sessionCreated: true,
-        phone: otpSession.phone_number
-      }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
-    )
-  } catch (error) {
-    console.error('[VERIFY-OTP] Unexpected error:', error)
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-    return new Response(
-      JSON.stringify({ error: `Verification failed: ${errorMessage}` }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
-    )
+    return json({ error: message, telegramError: name }, 400)
+  } finally {
+    await shutdown(client)
   }
 }
 
-async function handleVerifyPassword(
-  req: any,
-  supabaseClient: any,
-  user: any,
-  body: any
-): Promise<Response> {
-  console.log('[VERIFY-PASSWORD] Starting 2FA password verification')
-  console.log('[VERIFY-PASSWORD] Body received:', JSON.stringify(body))
-  
-  const { password, phoneCodeHash, sessionString } = body
+async function handleVerifyPassword(supabase: SupabaseClient, userId: string, body: Record<string, unknown>) {
+  const sessionId = String(body.sessionId ?? '').trim()
+  const password = String(body.password ?? '')
 
-  // Validate inputs
-  if (!password || !phoneCodeHash || !sessionString) {
-    console.error('[VERIFY-PASSWORD] Missing required fields')
-    return new Response(
-      JSON.stringify({ 
-        error: 'Missing required fields: password, phoneCodeHash, sessionString',
-        received: { password: !!password, phoneCodeHash: !!phoneCodeHash, sessionString: !!sessionString }
-      }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-    )
+  if (!sessionId || !password) {
+    return json({ error: 'الحقول المطلوبة ناقصة: sessionId و password' }, 400)
   }
 
+  const loaded = await loadOtpSession(supabase, userId, sessionId, 'pending_password')
+  if (loaded.error) return loaded.error
+  const otpSession = loaded.data
+
+  let client: TelegramClient | null = null
   try {
-    // Get OTP session from Supabase
-    console.log('[VERIFY-PASSWORD] Fetching OTP session from database...')
-    const { data: otpSession, error: fetchError } = await supabaseClient
-      .from('otp_sessions')
-      .select('*')
-      .eq('phone_code_hash', phoneCodeHash)
-      .eq('user_id', user.id)
-      .eq('auth_state', 'pending_password')
-      .single()
+    client = newClient(otpSession.api_id, otpSession.api_hash)
+    await client.importSession(otpSession.session_string)
+    await client.connect()
 
-    if (fetchError || !otpSession) {
-      console.error('[VERIFY-PASSWORD] OTP session not found:', fetchError)
-      return new Response(
-        JSON.stringify({ error: 'Invalid or expired password verification session.' }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-      )
-    }
+    await client.checkPassword(password)
 
-    console.log('[VERIFY-PASSWORD] OTP session found, verifying password...')
-
-    // In a real implementation, this would verify the password against Telegram
-    // For now, we'll accept any non-empty password as valid (for testing)
-    if (!password || password.length < 1) {
-      console.error('[VERIFY-PASSWORD] Invalid password')
-      return new Response(
-        JSON.stringify({ error: 'Invalid password. Please try again.' }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-      )
-    }
-
-    console.log('[VERIFY-PASSWORD] Password accepted, creating session...')
-
-    // Generate final session string
-    const sessionString = `session_${generateRandomString(64)}`
-
-    // Store session in Supabase
-    console.log('[VERIFY-PASSWORD] Storing telegram session...')
-    const { error: sessionError } = await supabaseClient
-      .from('telegram_sessions')
-      .upsert({
-        user_id: user.id,
-        session_data: sessionString,
-        phone: otpSession.phone_number,
-        updated_at: new Date().toISOString()
-      }, {
-        onConflict: 'user_id'
-      })
-
-    if (sessionError) {
-      console.error('[VERIFY-PASSWORD] Session storage error:', sessionError)
-      return new Response(
-        JSON.stringify({ error: `Failed to store session: ${sessionError.message}` }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
-      )
-    }
-
-    console.log('[VERIFY-PASSWORD] Telegram session stored successfully')
-
-    // Update user settings
-    console.log('[VERIFY-PASSWORD] Updating user settings...')
-    const { error: updateError } = await supabaseClient
-      .from('users')
-      .update({
-        telegram_phone: otpSession.phone_number,
-        telegram_api_id: otpSession.api_id.toString(),
-        telegram_api_hash: otpSession.api_hash,
-        monitoring_enabled: true,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', user.id)
-
-    if (updateError) {
-      console.error('[VERIFY-PASSWORD] User update error:', updateError)
-      return new Response(
-        JSON.stringify({ error: `Failed to update user settings: ${updateError.message}` }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
-      )
-    }
-
-    console.log('[VERIFY-PASSWORD] User settings updated successfully')
-
-    // Update OTP session to completed and delete
-    await supabaseClient
-      .from('otp_sessions')
-      .update({ auth_state: 'completed' })
-      .eq('id', otpSession.id)
-
-    await supabaseClient
-      .from('otp_sessions')
-      .delete()
-      .eq('id', otpSession.id)
-
-    console.log('[VERIFY-PASSWORD] Password verification completed successfully')
-
-    return new Response(
-      JSON.stringify({
-        success: true,
-        message: '2FA password verified successfully. Session created and stored.',
-        sessionCreated: true,
-        phone: otpSession.phone_number
-      }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
-    )
-  } catch (error) {
-    console.error('[VERIFY-PASSWORD] Unexpected error:', error)
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-    return new Response(
-      JSON.stringify({ error: `Password verification failed: ${errorMessage}` }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
-    )
+    console.log('[VERIFY-PASSWORD] 2FA accepted, persisting session', sessionId)
+    return await persistSession(supabase, client, otpSession)
+  } catch (err) {
+    const { name, message } = describeError(err, 'فشل التحقق من كلمة المرور')
+    console.error('[VERIFY-PASSWORD] Failed:', name, err)
+    return json({ error: message, telegramError: name }, 400)
+  } finally {
+    await shutdown(client)
   }
 }
 
-async function handleStoreSession(
-  req: any,
-  supabaseClient: any,
-  user: any,
-  body: any
-): Promise<Response> {
-  console.log('[STORE-SESSION] Starting session storage')
-  const { sessionData, phone } = body
-
-  if (!sessionData || !phone) {
-    console.error('[STORE-SESSION] Missing required fields:', { sessionData: !!sessionData, phone: !!phone })
-    return new Response(
-      JSON.stringify({ error: 'Missing required fields: sessionData, phone' }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-    )
-  }
-
-  try {
-    const { error: sessionError } = await supabaseClient
-      .from('telegram_sessions')
-      .upsert({
-        user_id: user.id,
-        session_data: sessionData,
-        phone: phone,
-        updated_at: new Date().toISOString()
-      }, {
-        onConflict: 'user_id'
-      })
-
-    if (sessionError) throw sessionError
-
-    const { error: updateError } = await supabaseClient
-      .from('users')
-      .update({
-        telegram_phone: phone,
-        monitoring_enabled: true,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', user.id)
-
-    if (updateError) throw updateError
-
-    console.log('[STORE-SESSION] Session stored successfully')
-
-    return new Response(
-      JSON.stringify({ success: true }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
-    )
-  } catch (error) {
-    console.error('[STORE-SESSION] Error:', error)
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-    return new Response(
-      JSON.stringify({ error: `Failed to store session: ${errorMessage}` }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
-    )
-  }
-}
-
-serve(async (req) => {
-  console.log('[MAIN] Incoming request:', req.method, req.url)
-  
-  // Handle CORS preflight
+Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
-    console.log('[MAIN] Handling CORS preflight')
     return new Response('ok', { headers: corsHeaders })
   }
+  if (req.method !== 'POST') {
+    return json({ error: 'Method not allowed' }, 405)
+  }
 
+  const supabaseUrl = Deno.env.get('SUPABASE_URL')
+  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+  if (!supabaseUrl || !serviceRoleKey) {
+    console.error('[MAIN] Missing Supabase configuration')
+    return json({ error: 'إعدادات Supabase غير مكتملة على الخادم' }, 500)
+  }
+  const supabase = createClient(supabaseUrl, serviceRoleKey)
+
+  const authHeader = req.headers.get('Authorization')
+  if (!authHeader) {
+    return json({ error: 'مطلوب تسجيل الدخول' }, 401)
+  }
+
+  const { data: { user }, error: userError } = await supabase.auth.getUser(
+    authHeader.replace(/^Bearer\s+/i, ''),
+  )
+  if (userError || !user) {
+    console.error('[MAIN] Token verification failed:', userError)
+    return json({ error: 'جلسة الدخول غير صالحة. سجّل الدخول مرة أخرى.' }, 401)
+  }
+
+  let body: Record<string, unknown>
   try {
-    // Initialize Supabase client
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')
-    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+    body = await req.json()
+  } catch {
+    return json({ error: 'صيغة الطلب غير صحيحة' }, 400)
+  }
 
-    if (!supabaseUrl || !supabaseKey) {
-      console.error('[MAIN] Missing Supabase configuration')
-      throw new Error('Missing Supabase configuration')
-    }
+  // The FK on otp_sessions requires a public.users row; create it if the signup
+  // trigger never ran for this account.
+  const { error: profileError } = await supabase
+    .from('users')
+    .upsert({ id: user.id, email: user.email }, { onConflict: 'id', ignoreDuplicates: true })
+  if (profileError) {
+    console.error('[MAIN] Failed to ensure user profile:', profileError)
+  }
 
-    const supabaseClient = createClient(supabaseUrl, supabaseKey)
+  const action = String(body.action ?? '')
+  console.log('[MAIN] action:', action, 'user:', user.id)
 
-    // Get authorization header
-    const authHeader = req.headers.get('Authorization')
-    console.log('[MAIN] Authorization header present:', !!authHeader)
-    
-    if (!authHeader) {
-      console.error('[MAIN] No authorization header provided')
-      return new Response(
-        JSON.stringify({ error: 'No authorization header' }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 401 }
+  switch (action) {
+    case 'send-otp':
+      return await handleSendOtp(supabase, user.id, body)
+    case 'verify-otp':
+      return await handleVerifyOtp(supabase, user.id, body)
+    case 'verify-password':
+      return await handleVerifyPassword(supabase, user.id, body)
+    default:
+      return json(
+        { error: 'إجراء غير معروف. الإجراءات المدعومة: send-otp, verify-otp, verify-password', receivedAction: action },
+        400,
       )
-    }
-
-    // Verify user token
-    const token = authHeader.replace('Bearer ', '')
-    console.log('[MAIN] Verifying token...')
-    
-    const { data: { user }, error: userError } = await supabaseClient.auth.getUser(token)
-    
-    if (userError || !user) {
-      console.error('[MAIN] Token verification failed:', userError)
-      return new Response(
-        JSON.stringify({ error: 'Unauthorized' }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 401 }
-      )
-    }
-
-    console.log('[MAIN] User authenticated:', user.id)
-
-    // Parse request body
-    let body: any
-    try {
-      const bodyText = await req.text()
-      console.log('[MAIN] Raw body text:', bodyText)
-      body = JSON.parse(bodyText)
-      console.log('[MAIN] Parsed body:', JSON.stringify(body))
-    } catch (error) {
-      console.error('[MAIN] JSON parse error:', error)
-      return new Response(
-        JSON.stringify({ error: 'Invalid JSON in request body' }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-      )
-    }
-
-    const { action } = body
-    console.log('[MAIN] Action:', action)
-
-    // Route to appropriate handler
-    if (action === 'send-otp') {
-      console.log('[MAIN] Routing to send-otp handler')
-      return await handleSendOtp(req, supabaseClient, user, body)
-    } else if (action === 'verify-otp') {
-      console.log('[MAIN] Routing to verify-otp handler')
-      return await handleVerifyOtp(req, supabaseClient, user, body)
-    } else if (action === 'verify-password') {
-      console.log('[MAIN] Routing to verify-password handler')
-      return await handleVerifyPassword(req, supabaseClient, user, body)
-    } else if (action === 'store-session') {
-      console.log('[MAIN] Routing to store-session handler')
-      return await handleStoreSession(req, supabaseClient, user, body)
-    } else {
-      console.error('[MAIN] Unknown action:', action)
-      return new Response(
-        JSON.stringify({
-          error: 'Unknown action. Supported actions: send-otp, verify-otp, verify-password, store-session',
-          receivedAction: action,
-          receivedBody: body
-        }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-      )
-    }
-
-  } catch (error) {
-    console.error('[MAIN] Unexpected error:', error)
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-    return new Response(
-      JSON.stringify({
-        error: `Unexpected error: ${errorMessage}`
-      }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
-    )
   }
 })
