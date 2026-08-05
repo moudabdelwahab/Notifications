@@ -40,6 +40,39 @@ const KIND = {
 
 type TypeFilter = 'all' | 'group' | 'channel' | 'private';
 
+/**
+ * A dropped connection, not a rejection from the server — the request may well
+ * have been carried out.
+ */
+function isTransportError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /Failed to send a request|Failed to fetch|NetworkError|Load failed|network/i.test(message);
+}
+
+/**
+ * Sends, and retries once if the response is lost in transit.
+ *
+ * Observed on a slow mobile connection: the message reaches Telegram and is
+ * logged, then the reply cannot make it back and the browser gives up. The send
+ * is idempotent on `dedupeKey`, so a second attempt either completes a send that
+ * genuinely failed or replays the original result — never a duplicate. That
+ * makes retrying automatically the correct behaviour rather than a gamble.
+ */
+async function sendWithRetry(
+  chatId: string,
+  text: string,
+  dedupeKey: string,
+  options: { replyTo?: number | null; attachment?: Attachment | null },
+) {
+  try {
+    return await sendMessage(chatId, text, dedupeKey, options);
+  } catch (err) {
+    if (!isTransportError(err)) throw err;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    return await sendMessage(chatId, text, dedupeKey, options);
+  }
+}
+
 function shortTime(iso: string | null): string {
   if (!iso) return '';
   return new Date(iso).toLocaleString('ar-EG', { dateStyle: 'short', timeStyle: 'short' });
@@ -169,7 +202,7 @@ export default function ConversationsPanel() {
     setSending(true);
     sendingRef.current = true;
     try {
-      const { message } = await sendMessage(activeChat.id, text, retryKeyRef.current, {
+      const { message } = await sendWithRetry(activeChat.id, text, retryKeyRef.current, {
         replyTo: replyTo?.id ?? null,
         attachment: attachment?.payload ?? null,
       });
@@ -192,13 +225,25 @@ export default function ConversationsPanel() {
       // The draft is deliberately left in the box so nothing typed is lost, and
       // retryKeyRef is deliberately kept so pressing send again is safe.
       const message = err instanceof Error ? err.message : 'تعذر إرسال الرسالة';
-      const lostResponse = /Failed to send a request|Failed to fetch|network/i.test(message);
-      toast.error(
-        lostResponse
-          ? 'انقطع الرد قبل وصوله. قد تكون الرسالة أُرسلت بالفعل — إعادة المحاولة آمنة ولن تُرسل نسخة ثانية.'
-          : message,
-        { duration: 8000 },
-      );
+      if (isTransportError(err)) {
+        toast.error(
+          'الشبكة بطيئة ولم يصل تأكيد الإرسال. جارٍ تحديث المحادثة لعرض ما وصل فعلاً — الرسالة لن تتكرر.',
+          { duration: 9000 },
+        );
+        // The reply was lost, so the only honest way to say what happened is to
+        // ask Telegram again and show the real thread.
+        getMessages(activeChat.id)
+          .then(({ messages: fresh }) => {
+            if (activeChatIdRef.current !== activeChat.id) return;
+            setMessages(fresh);
+            scrollToNewest();
+          })
+          .catch(() => {
+            // Nothing further to offer; the draft is still in the box.
+          });
+      } else {
+        toast.error(message, { duration: 8000 });
+      }
     } finally {
       setSending(false);
       sendingRef.current = false;
