@@ -35,6 +35,18 @@ const CHAT_KIND = {
   private: { label: 'محادثة خاصة', Icon: User },
 } as const;
 
+/**
+ * Derives a link to the chat from the message link.
+ *
+ * `https://t.me/c/<chat>/<msg>` → `https://t.me/c/<chat>` — the private-chat
+ * form Telegram uses for groups and channels you are a member of.
+ */
+function chatLinkFrom(messageLink: string | null): string | null {
+  if (!messageLink) return null;
+  const match = messageLink.match(/^(https:\/\/t\.me\/c\/\d+)\/\d+$/);
+  return match ? match[1] : null;
+}
+
 function formatDate(iso: string): string {
   // ar-EG with the Gregorian calendar — ar-SA would render Hijri dates, which do
   // not line up with the timestamps shown inside Telegram.
@@ -58,6 +70,7 @@ export default function NotificationDetailDialog({
   const isMention = notification.type === 'mention';
   const kind = notification.chat_type ? CHAT_KIND[notification.chat_type] : null;
   const KindIcon = kind?.Icon ?? Hash;
+  const chatLink = chatLinkFrom(notification.message_link);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -116,17 +129,31 @@ export default function NotificationDetailDialog({
           </div>
 
           {notification.message_link ? (
-            <a
-              href={notification.message_link}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="block"
-            >
-              <Button className="w-full h-11 bg-blue-600 hover:bg-blue-700 text-white rounded-xl flex items-center justify-center gap-2">
-                افتح الرسالة في Telegram
-                <ExternalLink className="w-4 h-4" />
-              </Button>
-            </a>
+            <div className="space-y-2">
+              <a
+                href={notification.message_link}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block"
+              >
+                <Button className="w-full h-11 bg-blue-600 hover:bg-blue-700 text-white rounded-xl flex items-center justify-center gap-2">
+                  افتح الرسالة في Telegram
+                  <ExternalLink className="w-4 h-4" />
+                </Button>
+              </a>
+
+              {chatLink && (
+                <a href={chatLink} target="_blank" rel="noopener noreferrer" className="block">
+                  <Button
+                    variant="outline"
+                    className="w-full h-11 rounded-xl flex items-center justify-center gap-2"
+                  >
+                    <KindIcon className="w-4 h-4" />
+                    افتح {kind?.label ?? 'المحادثة'} في Telegram
+                  </Button>
+                </a>
+              )}
+            </div>
           ) : (
             <p className="text-xs text-gray-500 text-center">
               لا يوجد رابط مباشر لهذه الرسالة (المحادثات الخاصة لا تدعم روابط الرسائل)

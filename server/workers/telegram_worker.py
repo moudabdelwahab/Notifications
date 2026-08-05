@@ -7,6 +7,10 @@ Runs on a schedule from .github/workflows/telegram-monitor.yml.
 Exit code is 0 only when every linked account was processed successfully — a
 previous version swallowed all exceptions and always exited 0, so 698 scheduled
 runs reported "success" while inserting nothing.
+
+Each run resumes from `telegram_sessions.last_scanned_at` rather than a fixed
+window: GitHub throttles the '*/5' schedule on quiet repositories down to about
+one run per hour, and a fixed 6-minute lookback dropped everything in between.
 """
 
 import asyncio
@@ -28,11 +32,15 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-# How far back each run looks. Slightly wider than the 5-minute schedule so a
-# late run does not leave a gap.
-LOOKBACK = timedelta(minutes=6)
+# The workflow asks for every 5 minutes, but GitHub throttles scheduled runs on
+# quiet repositories heavily — in practice this fires roughly once an hour, and
+# gaps of several hours happen. So each run resumes from where the last one
+# finished rather than assuming the schedule was honoured.
+OVERLAP = timedelta(minutes=1)  # re-check a little either side of the boundary
+MAX_LOOKBACK = timedelta(hours=24)  # first run, or after a long outage
+DEFAULT_LOOKBACK = timedelta(hours=1)  # no recorded scan yet
 DIALOG_LIMIT = 100
-MESSAGE_LIMIT = 50
+MESSAGE_LIMIT = 200
 
 
 def looks_like_telethon_session(session_str: str) -> bool:
@@ -66,9 +74,28 @@ def chat_kind(dialog) -> str:
     return "private"
 
 
-async def process_user(user_id, api_id, api_hash, session_str) -> bool:
+def scan_since(last_scanned_at) -> datetime:
+    """
+    Where this run should start reading from.
+
+    Resuming from the previous scan is what keeps messages from being dropped
+    when GitHub delays the schedule by an hour or more. Capped so that a long
+    outage does not turn into an unbounded backfill.
+    """
+    now = datetime.now(timezone.utc)
+    if not last_scanned_at:
+        return now - DEFAULT_LOOKBACK
+
+    parsed = datetime.fromisoformat(str(last_scanned_at).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(parsed - OVERLAP, now - MAX_LOOKBACK)
+
+
+async def process_user(user_id, api_id, api_hash, session_str, last_scanned_at) -> bool:
     """Returns True when the account was scanned successfully."""
-    print(f"[{user_id}] scanning")
+    since = scan_since(last_scanned_at)
+    print(f"[{user_id}] scanning messages since {since.isoformat()}")
 
     if not looks_like_telethon_session(session_str):
         print(
@@ -96,12 +123,49 @@ async def process_user(user_id, api_id, api_hash, session_str) -> bool:
         if not my_username:
             print(f"[{user_id}] note: account has no username, only replies can be detected")
 
-        time_threshold = datetime.now(timezone.utc) - LOOKBACK
+        scan_started = datetime.now(timezone.utc)
         found = 0
 
-        async for dialog in client.iter_dialogs(limit=DIALOG_LIMIT):
+        dialogs = [d async for d in client.iter_dialogs(limit=DIALOG_LIMIT)]
+
+        # Publish the chat list so the user has something to pick from in Settings,
+        # then honour whatever they already turned off.
+        supabase.rpc(
+            "record_monitored_chats",
+            {
+                "p_user_id": user_id,
+                "p_chats": [
+                    {
+                        "chat_id": str(d.id),
+                        "chat_title": d.name or None,
+                        "chat_type": chat_kind(d),
+                    }
+                    for d in dialogs
+                ],
+            },
+        ).execute()
+
+        disabled = {
+            row["chat_id"]
+            for row in (
+                supabase.table("monitored_chats")
+                .select("chat_id")
+                .eq("user_id", user_id)
+                .eq("enabled", False)
+                .execute()
+                .data
+                or []
+            )
+        }
+        if disabled:
+            print(f"[{user_id}] {len(disabled)} chat(s) muted by the user")
+
+        for dialog in dialogs:
+            if str(dialog.id) in disabled:
+                continue
+
             async for message in client.iter_messages(dialog.id, limit=MESSAGE_LIMIT):
-                if message.date < time_threshold:
+                if message.date < since:
                     break
 
                 # Never notify someone about their own message.
@@ -155,7 +219,13 @@ async def process_user(user_id, api_id, api_hash, session_str) -> bool:
                     print(f"[{user_id}] failed to store {notification['source']}: {exc}", file=sys.stderr)
                     return False
 
-        print(f"[{user_id}] done, {found} notification(s)")
+        # Only advance the watermark on a clean pass, so a failure re-scans the
+        # same window next time instead of skipping over it.
+        supabase.table("telegram_sessions").update(
+            {"last_scanned_at": scan_started.isoformat()}
+        ).eq("user_id", user_id).execute()
+
+        print(f"[{user_id}] done, {found} notification(s), {len(dialogs)} chat(s) scanned")
         return True
 
     except Exception as exc:
@@ -171,7 +241,10 @@ async def process_user(user_id, api_id, api_hash, session_str) -> bool:
 async def main() -> int:
     response = (
         supabase.table("telegram_sessions")
-        .select("user_id, session_data, users(telegram_api_id, telegram_api_hash, monitoring_enabled)")
+        .select(
+            "user_id, session_data, last_scanned_at, "
+            "users(telegram_api_id, telegram_api_hash, monitoring_enabled)"
+        )
         .execute()
     )
 
@@ -197,7 +270,13 @@ async def main() -> int:
             continue
 
         tasks.append(
-            process_user(session["user_id"], int(api_id_raw), api_hash, session["session_data"])
+            process_user(
+                session["user_id"],
+                int(api_id_raw),
+                api_hash,
+                session["session_data"],
+                session.get("last_scanned_at"),
+            )
         )
 
     if not tasks:
