@@ -416,14 +416,14 @@ export default function AutoReplyPanel({ userId }: { userId: string | undefined 
                     <Switch checked={rule.enabled} onCheckedChange={() => toggle(rule)} />
                     <button
                       onClick={() => startEdit(rule)}
-                      className="text-gray-400 hover:text-blue-600 p-1"
+                      className="text-gray-400 hover:text-blue-600 p-2 -m-1 rounded-lg"
                       title="تعديل"
                     >
                       <Pencil className="w-4 h-4" />
                     </button>
                     <button
                       onClick={() => remove(rule)}
-                      className="text-gray-400 hover:text-red-600 p-1"
+                      className="text-gray-400 hover:text-red-600 p-2 -m-1 rounded-lg"
                       title="حذف"
                     >
                       <Trash2 className="w-4 h-4" />

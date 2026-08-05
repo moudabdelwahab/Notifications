@@ -128,8 +128,8 @@ export default function Settings() {
       </header>
 
       {/* Main Content */}
-      <div className="container max-w-2xl mx-auto px-4 py-8">
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
+      <div className="container max-w-2xl mx-auto px-3 sm:px-4 py-5 sm:py-8">
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-5 sm:p-8">
           <div className="space-y-8">
             {/* Telegram API Settings */}
             <div>
@@ -282,7 +282,7 @@ export default function Settings() {
         </div>
 
         {/* Scheduled auto-replies */}
-        <div className="mt-8 bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
+        <div className="mt-8 bg-white rounded-2xl shadow-sm border border-gray-200 p-5 sm:p-8">
           <h2 className="text-xl font-bold text-gray-900 mb-6 font-display flex items-center gap-2">
             <MessageSquareReply className="w-5 h-5 text-blue-600" />
             الرد الآلي المجدول
@@ -291,7 +291,7 @@ export default function Settings() {
         </div>
 
         {/* Help Section */}
-        <div className="mt-8 bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
+        <div className="mt-8 bg-white rounded-2xl shadow-sm border border-gray-200 p-5 sm:p-8">
           <h3 className="text-lg font-bold text-gray-900 mb-4 font-display">
             هل تحتاج إلى مساعدة؟
           </h3>

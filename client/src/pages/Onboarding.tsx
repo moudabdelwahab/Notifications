@@ -231,37 +231,61 @@ export default function Onboarding() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-white via-blue-50 to-white">
-      <div className="container max-w-2xl mx-auto py-12 px-4">
-        <div className="text-center mb-12">
-          <h1 className="text-4xl font-bold text-gray-900 mb-2 font-display">
+      <div className="container max-w-2xl mx-auto py-6 sm:py-12 px-4">
+        <div className="text-center mb-6 sm:mb-12">
+          <h1 className="text-2xl sm:text-4xl font-bold text-gray-900 mb-2 font-display">
             إعداد Telegram Notifier
           </h1>
-          <p className="text-gray-600">اتبع الخطوات البسيطة لبدء مراقبة إشاراتك</p>
+          <p className="text-sm sm:text-base text-gray-600">
+            اتبع الخطوات البسيطة لبدء مراقبة إشاراتك
+          </p>
         </div>
 
-        {/* Progress indicator */}
-        <div className="flex justify-between mb-12 overflow-x-auto">
-          {STEPS.map((s, i) => (
-            <div key={s} className="flex-1 flex items-center min-w-max">
-              <div
-                className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold transition-all ${
-                  i <= currentIndex ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600'
-                }`}
-              >
-                {i + 1}
-              </div>
-              {i < STEPS.length - 1 && (
-                <div
-                  className={`flex-1 h-1 mx-1 transition-all min-w-[20px] ${
-                    i < currentIndex ? 'bg-blue-600' : 'bg-gray-200'
-                  }`}
-                ></div>
-              )}
+        {/* Progress indicator.
+            Seven numbered circles do not fit across a phone without either
+            scrolling sideways or shrinking past legibility, so small screens get
+            a single bar and a step count instead. */}
+        <div className="mb-8 sm:mb-12">
+          <div className="sm:hidden">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-semibold text-gray-900">
+                الخطوة {currentIndex + 1} من {STEPS.length}
+              </span>
+              <span className="text-xs text-gray-500">
+                {Math.round(((currentIndex + 1) / STEPS.length) * 100)}%
+              </span>
             </div>
-          ))}
+            <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-blue-600 transition-all duration-300"
+                style={{ width: `${((currentIndex + 1) / STEPS.length) * 100}%` }}
+              />
+            </div>
+          </div>
+
+          <div className="hidden sm:flex justify-between">
+            {STEPS.map((s, i) => (
+              <div key={s} className="flex-1 flex items-center min-w-max">
+                <div
+                  className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold transition-all ${
+                    i <= currentIndex ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600'
+                  }`}
+                >
+                  {i + 1}
+                </div>
+                {i < STEPS.length - 1 && (
+                  <div
+                    className={`flex-1 h-1 mx-1 transition-all min-w-[20px] ${
+                      i < currentIndex ? 'bg-blue-600' : 'bg-gray-200'
+                    }`}
+                  ></div>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
 
-        <div className="bg-white rounded-2xl shadow-lg p-8 border border-gray-100">
+        <div className="bg-white rounded-2xl shadow-lg p-5 sm:p-8 border border-gray-100">
           {step === 'welcome' && (
             <div className="space-y-6">
               <div>
