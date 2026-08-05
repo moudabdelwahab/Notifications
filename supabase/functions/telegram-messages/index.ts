@@ -1,13 +1,20 @@
 /**
- * telegram-messages — reads chats and their recent history on demand.
+ * telegram-messages — reads chats and their recent history, and sends messages.
  *
  * Actions:
  *   list-chats    {}                            -> { chats: [...] }
  *   get-messages  { chatId, limit? }            -> { messages: [...] }
+ *   send-message  { chatId, text }              -> { message: {...} }
  *
- * Nothing is stored. Each call opens a short-lived MTProto connection using the
- * user's Vault-held session, reads, and disconnects — so the browser never sees
- * the session and no copy of the user's conversations lands in the database.
+ * Conversations are never stored. Each call opens a short-lived MTProto
+ * connection using the user's Vault-held session, acts, and disconnects — so the
+ * browser never sees the session and no copy of the user's conversations lands
+ * in the database.
+ *
+ * `send-message` is the only write path to the user's real Telegram account.
+ * Every send is recorded in sent_messages_log and capped, because a retry storm
+ * or a loop in the UI would deliver real messages to real people and can get the
+ * account restricted by Telegram.
  */
 import { TelegramClient } from 'jsr:@mtcute/web@0.31.0'
 import { MemoryStorage } from 'jsr:@mtcute/core@0.31.0'
@@ -23,6 +30,12 @@ const corsHeaders = {
 const CHAT_LIMIT = 200
 const DEFAULT_MESSAGE_LIMIT = 50
 const MAX_MESSAGE_LIMIT = 100
+
+/** Telegram rejects anything longer outright. */
+const MAX_TEXT_LENGTH = 4096
+/** Deliberately well under Telegram's own limits — this is a human typing. */
+const SEND_LIMIT_PER_MINUTE = 10
+const SEND_LIMIT_PER_HOUR = 100
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -173,6 +186,101 @@ async function handleGetMessages(client: TelegramClient, body: Record<string, un
   return json({ messages })
 }
 
+/**
+ * Refuses the send when the user is over either cap.
+ *
+ * Counting rows rather than trusting the client is the point: the browser can
+ * retry as fast as it likes and still not get past this.
+ */
+async function overRateLimit(
+  supabase: SupabaseClient,
+  userId: string,
+): Promise<{ blocked: true; message: string } | { blocked: false }> {
+  const now = Date.now()
+  const since = new Date(now - 60 * 60 * 1000).toISOString()
+
+  const { data, error } = await supabase
+    .from('sent_messages_log')
+    .select('sent_at')
+    .eq('user_id', userId)
+    .gte('sent_at', since)
+
+  if (error) {
+    console.error('[SEND] rate-limit lookup failed:', error)
+    // Fail closed: if the guard cannot be evaluated, do not send.
+    return { blocked: true, message: 'تعذر التحقق من حد الإرسال. حاول بعد قليل.' }
+  }
+
+  const rows = data ?? []
+  if (rows.length >= SEND_LIMIT_PER_HOUR) {
+    return { blocked: true, message: 'تجاوزت حد الإرسال لهذه الساعة. حاول لاحقاً.' }
+  }
+
+  const lastMinute = rows.filter(
+    (r) => now - new Date(r.sent_at as string).getTime() < 60 * 1000,
+  ).length
+  if (lastMinute >= SEND_LIMIT_PER_MINUTE) {
+    return { blocked: true, message: 'أرسلت رسائل كثيرة خلال دقيقة. انتظر قليلاً.' }
+  }
+
+  return { blocked: false }
+}
+
+async function handleSendMessage(
+  supabase: SupabaseClient,
+  userId: string,
+  client: TelegramClient,
+  body: Record<string, unknown>,
+) {
+  const chatIdRaw = String(body.chatId ?? '').trim()
+  const text = String(body.text ?? '').trim()
+
+  if (!chatIdRaw) return json({ error: 'chatId مطلوب' }, 400)
+  if (!text) return json({ error: 'لا يمكن إرسال رسالة فارغة' }, 400)
+  if (text.length > MAX_TEXT_LENGTH) {
+    return json({ error: `الرسالة أطول من الحد المسموح (${MAX_TEXT_LENGTH} حرف)` }, 400)
+  }
+
+  const chatId = Number(chatIdRaw)
+  if (!Number.isFinite(chatId)) return json({ error: 'chatId غير صالح' }, 400)
+
+  const limit = await overRateLimit(supabase, userId)
+  if (limit.blocked) return json({ error: limit.message }, 429)
+
+  const peer = await client.resolvePeer(chatId)
+  const sent: any = await client.sendText(peer, text)
+
+  // Logged after the send so a failed attempt does not consume the user's quota.
+  const { error: logError } = await supabase.from('sent_messages_log').insert({
+    user_id: userId,
+    chat_id: chatIdRaw,
+    message_id: sent?.id ?? null,
+  })
+  if (logError) {
+    // The message is already delivered; losing the audit row must not look like
+    // a failed send, but it does need to be visible in the logs.
+    console.error('[SEND] delivered but failed to log:', logError)
+  }
+
+  console.log('[SEND] user', userId, 'chat', chatIdRaw, 'message', sent?.id)
+
+  return json({
+    message: {
+      id: sent?.id ?? null,
+      text,
+      date: sent?.date?.toISOString?.() ?? new Date().toISOString(),
+      outgoing: true,
+      senderName: 'أنت',
+      senderId: null,
+      hasMedia: false,
+      mediaType: null,
+      isService: false,
+      isReply: false,
+      link: safeLink(sent),
+    },
+  })
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
   if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405)
@@ -216,9 +324,14 @@ Deno.serve(async (req: Request) => {
         return await handleListChats(client)
       case 'get-messages':
         return await handleGetMessages(client, body)
+      case 'send-message':
+        return await handleSendMessage(supabase, user.id, client, body)
       default:
         return json(
-          { error: 'إجراء غير معروف. الإجراءات المدعومة: list-chats, get-messages' },
+          {
+            error:
+              'إجراء غير معروف. الإجراءات المدعومة: list-chats, get-messages, send-message',
+          },
           400,
         )
     }
@@ -238,7 +351,15 @@ Deno.serve(async (req: Request) => {
       return json({ error: 'انتهت صلاحية جلسة Telegram. أعد ربط حسابك.' }, 401)
     }
 
-    return json({ error: `تعذر قراءة المحادثات (${detail})` }, 500)
+    if (/CHAT_WRITE_FORBIDDEN|CHAT_SEND_.*FORBIDDEN|USER_IS_BLOCKED|PEER_ID_INVALID/i.test(detail)) {
+      return json({ error: 'لا يمكن الإرسال إلى هذه المحادثة.' }, 403)
+    }
+    const flood = detail.match(/FLOOD_WAIT_(\d+)/i)
+    if (flood) {
+      return json({ error: `Telegram يطلب الانتظار ${flood[1]} ثانية قبل الإرسال مرة أخرى.` }, 429)
+    }
+
+    return json({ error: `تعذر تنفيذ الطلب (${detail})` }, 500)
   } finally {
     try {
       await client?.destroy()
