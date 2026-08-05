@@ -91,6 +91,37 @@ def mentions_me(message, my_id, my_username) -> bool:
     return False
 
 
+def matched_keyword(text: str, keywords) -> str | None:
+    """
+    First monitored keyword contained in the message, matched case-insensitively.
+
+    Substring matching is deliberate: these are business terms like a product or
+    ticket name, and requiring word boundaries would miss them inside URLs and
+    identifiers, which is exactly where they tend to appear.
+    """
+    if not text or not keywords:
+        return None
+    haystack = text.casefold()
+    for keyword in keywords:
+        if keyword.casefold() in haystack:
+            return keyword
+    return None
+
+
+def set_session_status(user_id, status: str, message: str | None) -> None:
+    """Records why an account stopped working so the dashboard can say so."""
+    try:
+        supabase.table("telegram_sessions").update(
+            {
+                "status": status,
+                "status_message": message,
+                "status_changed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).eq("user_id", user_id).execute()
+    except Exception as exc:
+        print(f"[{user_id}] could not record session status: {exc}", file=sys.stderr)
+
+
 def chat_kind(dialog) -> str:
     """
     Classifies a dialog for display.
@@ -134,6 +165,7 @@ async def process_user(user_id, api_id, api_hash, session_str, last_scanned_at) 
             "The user must re-link their account via /onboarding.",
             file=sys.stderr,
         )
+        set_session_status(user_id, "invalid", "الجلسة المخزّنة غير صالحة. أعد ربط حسابك.")
         return False
 
     client = TelegramClient(StringSession(session_str), api_id, api_hash)
@@ -145,6 +177,9 @@ async def process_user(user_id, api_id, api_hash, session_str, last_scanned_at) 
                 f"[{user_id}] SKIP: session is no longer authorized (revoked or expired). "
                 "The user must re-link their account.",
                 file=sys.stderr,
+            )
+            set_session_status(
+                user_id, "expired", "انتهت صلاحية جلسة Telegram أو تم إلغاؤها. أعد ربط حسابك."
             )
             return False
 
@@ -195,6 +230,21 @@ async def process_user(user_id, api_id, api_hash, session_str, last_scanned_at) 
         if disabled:
             print(f"[{user_id}] {len(disabled)} chat(s) muted by the user")
 
+        keywords = [
+            row["keyword"]
+            for row in (
+                supabase.table("monitored_keywords")
+                .select("keyword")
+                .eq("user_id", user_id)
+                .eq("enabled", True)
+                .execute()
+                .data
+                or []
+            )
+        ]
+        if keywords:
+            print(f"[{user_id}] watching {len(keywords)} keyword(s)")
+
         for dialog in dialogs:
             if str(dialog.id) in disabled:
                 continue
@@ -243,7 +293,13 @@ async def process_user(user_id, api_id, api_hash, session_str, last_scanned_at) 
                 # are classified first and mention is what is left over.
                 is_mention = not is_reply and mentions_me(message, my_id, my_username)
 
-                if not (is_mention or is_reply):
+                # Keywords are the fallback classification: an explicit mention or
+                # a reply is more specific and should keep its own label.
+                keyword_hit = None
+                if not (is_reply or is_mention):
+                    keyword_hit = matched_keyword(message.message or "", keywords)
+
+                if not (is_mention or is_reply or keyword_hit):
                     continue
 
                 sender = await message.get_sender()
@@ -260,7 +316,8 @@ async def process_user(user_id, api_id, api_hash, session_str, last_scanned_at) 
 
                 notification = {
                     "user_id": user_id,
-                    "type": "mention" if is_mention else "reply",
+                    "type": "reply" if is_reply else ("mention" if is_mention else "keyword"),
+                    "matched_keyword": keyword_hit,
                     "source": f"tg_{dialog.id}_{message.id}",
                     "message_text": message.message or "[Media/No Text]",
                     "message_link": message_link,
@@ -285,7 +342,11 @@ async def process_user(user_id, api_id, api_hash, session_str, last_scanned_at) 
         # Only advance the watermark on a clean pass, so a failure re-scans the
         # same window next time instead of skipping over it.
         supabase.table("telegram_sessions").update(
-            {"last_scanned_at": scan_started.isoformat()}
+            {
+                "last_scanned_at": scan_started.isoformat(),
+                "status": "active",
+                "status_message": None,
+            }
         ).eq("user_id", user_id).execute()
 
         print(f"[{user_id}] done, {found} notification(s), {len(dialogs)} chat(s) scanned")

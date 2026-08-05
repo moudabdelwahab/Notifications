@@ -15,11 +15,13 @@ import {
   User,
   Users,
   Radio,
+  Tag,
 } from 'lucide-react';
 
 export interface NotificationDetail {
   id: string;
-  type: 'mention' | 'reply';
+  type: 'mention' | 'reply' | 'keyword';
+  matched_keyword: string | null;
   source: string;
   message_text: string;
   message_link: string | null;
@@ -29,6 +31,12 @@ export interface NotificationDetail {
   chat_username: string | null;
   created_at: string;
 }
+
+const TYPE_HEADING = {
+  mention: { title: 'إشارة إليك', Icon: AtSign, fg: 'text-blue-600' },
+  reply: { title: 'رد على رسالتك', Icon: CornerUpLeft, fg: 'text-green-600' },
+  keyword: { title: 'كلمة مفتاحية', Icon: Tag, fg: 'text-amber-600' },
+} as const;
 
 const CHAT_KIND = {
   group: { label: 'مجموعة', Icon: Users },
@@ -68,7 +76,8 @@ export default function NotificationDetailDialog({
 }) {
   if (!notification) return null;
 
-  const isMention = notification.type === 'mention';
+  const heading = TYPE_HEADING[notification.type];
+  const HeadingIcon = heading.Icon;
   const kind = notification.chat_type ? CHAT_KIND[notification.chat_type] : null;
   const KindIcon = kind?.Icon ?? Hash;
   const chatLink = chatLinkFor(notification.chat_username);
@@ -78,12 +87,8 @@ export default function NotificationDetailDialog({
       <DialogContent className="sm:max-w-lg" dir="rtl">
         <DialogHeader className="text-right">
           <DialogTitle className="flex items-center gap-2">
-            {isMention ? (
-              <AtSign className="w-5 h-5 text-blue-600" />
-            ) : (
-              <CornerUpLeft className="w-5 h-5 text-green-600" />
-            )}
-            {isMention ? 'إشارة إليك' : 'رد على رسالتك'}
+            <HeadingIcon className={`w-5 h-5 ${heading.fg}`} />
+            {heading.title}
           </DialogTitle>
           <DialogDescription>تفاصيل الإشعار كما وردت من Telegram</DialogDescription>
         </DialogHeader>
@@ -119,6 +124,15 @@ export default function NotificationDetailDialog({
             </span>
             <span className="text-gray-900">{formatDate(notification.created_at)}</span>
           </div>
+
+          {notification.matched_keyword && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-center gap-2">
+              <Tag className="w-4 h-4 text-amber-600 flex-shrink-0" />
+              <p className="text-sm text-amber-900">
+                طابقت الكلمة المفتاحية <strong>{notification.matched_keyword}</strong>
+              </p>
+            </div>
+          )}
 
           <div>
             <p className="text-sm text-gray-500 mb-2">نص الرسالة</p>
