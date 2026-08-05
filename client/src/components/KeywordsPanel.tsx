@@ -183,7 +183,7 @@ export default function KeywordsPanel({ userId }: { userId: string | undefined }
               <button
                 onClick={() => remove(keyword)}
                 title="حذف"
-                className="text-gray-400 hover:text-red-600 transition-colors p-1"
+                className="text-gray-400 hover:text-red-600 transition-colors p-2 -m-1 rounded-lg"
               >
                 <Trash2 className="w-4 h-4" />
               </button>

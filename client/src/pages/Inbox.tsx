@@ -256,7 +256,7 @@ export default function Inbox() {
         </div>
       </header>
 
-      <div className="container max-w-7xl mx-auto px-4 py-6">
+      <div className="container max-w-7xl mx-auto px-3 sm:px-4 py-4 sm:py-6">
         {tab === 'conversations' ? (
           <ConversationsPanel />
         ) : (
@@ -331,7 +331,7 @@ export default function Inbox() {
                   </p>
                 </div>
               ) : (
-                <div className="divide-y divide-gray-200 max-h-[60vh] overflow-y-auto">
+                <div className="divide-y divide-gray-200 max-h-[55dvh] lg:max-h-[60vh] overflow-y-auto">
                   {visible.map((notification) => {
                     const style = TYPE_STYLE[notification.type];
                     const TypeIcon = style.Icon;

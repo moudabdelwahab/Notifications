@@ -135,7 +135,7 @@ export function NotificationDetailBody({ notification }: { notification: Notific
           <div>
             <p className="text-sm text-gray-500 mb-2">نص الرسالة</p>
             <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 max-h-64 overflow-y-auto">
-              <p className="text-gray-900 whitespace-pre-wrap break-words">
+              <p className="text-gray-900 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
                 {notification.message_text}
               </p>
             </div>

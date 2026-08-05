@@ -24,6 +24,7 @@ import {
   MessagesSquare,
   Paperclip,
   ExternalLink,
+  ArrowRight,
   AlertTriangle,
   Send,
   CornerUpLeft,
@@ -315,8 +316,9 @@ export default function ConversationsPanel() {
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-      {/* Chat list */}
-      <div className="lg:col-span-2">
+      {/* Chat list — on a phone this is a separate screen from the thread, so
+          opening a chat replaces it instead of pushing it far down the page. */}
+      <div className={`lg:col-span-2 ${activeChat ? 'hidden lg:block' : 'block'}`}>
         <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
           <div className="p-4 border-b border-gray-200 space-y-3">
             <div className="flex items-center gap-2">
@@ -380,7 +382,7 @@ export default function ConversationsPanel() {
           ) : visible.length === 0 ? (
             <p className="text-sm text-gray-500 text-center py-10">لا توجد محادثات مطابقة</p>
           ) : (
-            <div className="divide-y divide-gray-200 max-h-[62vh] overflow-y-auto">
+            <div className="divide-y divide-gray-200 max-h-[60dvh] lg:max-h-[62vh] overflow-y-auto">
               {visible.map((chat) => {
                 const kind = KIND[chat.type];
                 const Icon = kind.Icon;
@@ -426,7 +428,7 @@ export default function ConversationsPanel() {
       </div>
 
       {/* Thread */}
-      <div className="lg:col-span-3">
+      <div className={`lg:col-span-3 ${activeChat ? 'block' : 'hidden lg:block'}`}>
         <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden lg:sticky lg:top-24">
           {!activeChat ? (
             <div className="py-20 text-center">
@@ -435,8 +437,16 @@ export default function ConversationsPanel() {
             </div>
           ) : (
             <>
-              <div className="p-4 border-b border-gray-200 flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center flex-shrink-0">
+              <div className="p-3 sm:p-4 border-b border-gray-200 flex items-center gap-2 sm:gap-3">
+                <Button
+                  onClick={() => setActiveChat(null)}
+                  variant="ghost"
+                  className="lg:hidden h-10 w-10 p-0 rounded-lg flex-shrink-0"
+                  title="رجوع إلى المحادثات"
+                >
+                  <ArrowRight className="w-5 h-5" />
+                </Button>
+                <div className="w-10 h-10 rounded-full bg-gray-100 hidden sm:flex items-center justify-center flex-shrink-0">
                   {(() => {
                     const Icon = KIND[activeChat.type].Icon;
                     return <Icon className="w-5 h-5 text-gray-500" />;
@@ -455,9 +465,13 @@ export default function ConversationsPanel() {
                     target="_blank"
                     rel="noopener noreferrer"
                   >
-                    <Button variant="outline" size="sm" className="rounded-lg flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="rounded-lg h-10 flex items-center gap-2 flex-shrink-0"
+                    >
                       <ExternalLink className="w-4 h-4" />
-                      Telegram
+                      <span className="hidden sm:inline">Telegram</span>
                     </Button>
                   </a>
                 )}
@@ -483,7 +497,7 @@ export default function ConversationsPanel() {
               ) : messages.length === 0 ? (
                 <p className="text-sm text-gray-500 text-center py-16">لا توجد رسائل</p>
               ) : (
-                <div ref={threadRef} className="p-4 space-y-3 max-h-[55vh] overflow-y-auto">
+                <div ref={threadRef} className="p-4 space-y-3 max-h-[58dvh] lg:max-h-[55vh] overflow-y-auto">
                   {messages.map((message) => (
                     <div
                       key={message.id}
@@ -504,7 +518,7 @@ export default function ConversationsPanel() {
                           </p>
                         )}
 
-                        <p className="whitespace-pre-wrap break-words text-sm">
+                        <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-sm">
                           {message.text || '—'}
                         </p>
 
