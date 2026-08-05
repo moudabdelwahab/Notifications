@@ -28,7 +28,15 @@ export interface VerifyPasswordResult {
  * every Telegram error reaches the user as the same meaningless string.
  */
 export async function callTelegramAuth<T>(body: Record<string, unknown>): Promise<T> {
-  const { data, error } = await supabase.functions.invoke('telegram-auth', { body });
+  return callEdgeFunction<T>('telegram-auth', body);
+}
+
+/** Same unwrapping for any of the project's Edge Functions. */
+export async function callEdgeFunction<T>(
+  name: string,
+  body: Record<string, unknown>,
+): Promise<T> {
+  const { data, error } = await supabase.functions.invoke(name, { body });
 
   if (error) {
     const response = (error as { context?: Response }).context;

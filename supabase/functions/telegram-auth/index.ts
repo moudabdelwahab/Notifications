@@ -11,8 +11,7 @@
  * memory, so the intermediate mtcute session is persisted in `otp_sessions.session_string`.
  *
  * On success the session is converted to a Telethon v1 string session and stored in
- * `telegram_sessions.session_data`, which is the format `server/workers/telegram_worker.py`
- * (Telethon) reads.
+ * Supabase Vault, which is the format `server/workers/telegram_worker.py` (Telethon) reads.
  */
 import { TelegramClient } from 'jsr:@mtcute/web@0.31.0'
 import { MemoryStorage } from 'jsr:@mtcute/core@0.31.0'
@@ -117,33 +116,19 @@ async function persistSession(
   const mtcuteSession = await client.exportSession()
   const telethonSession = convertToTelethonSession(readStringSession(mtcuteSession))
 
-  const { error: sessionError } = await supabase.from('telegram_sessions').upsert(
-    {
-      user_id: otpSession.user_id,
-      session_data: telethonSession,
-      phone: otpSession.phone_number,
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: 'user_id' },
-  )
-  if (sessionError) {
-    console.error('[PERSIST] Failed to store telegram session:', sessionError)
-    return json({ error: `تعذر حفظ جلسة Telegram: ${sessionError.message}` }, 500)
-  }
-
-  const { error: userError } = await supabase
-    .from('users')
-    .update({
-      telegram_phone: otpSession.phone_number,
-      telegram_api_id: String(otpSession.api_id),
-      telegram_api_hash: otpSession.api_hash,
-      monitoring_enabled: true,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', otpSession.user_id)
-  if (userError) {
-    console.error('[PERSIST] Failed to update user settings:', userError)
-    return json({ error: `تعذر تحديث إعدادات المستخدم: ${userError.message}` }, 500)
+  // The session string and api_hash grant full control of the Telegram account,
+  // so they are written straight into Vault. This RPC is the only writer; nothing
+  // stores them as plaintext columns.
+  const { error: storeError } = await supabase.rpc('set_telegram_session', {
+    p_user_id: otpSession.user_id,
+    p_session: telethonSession,
+    p_phone: otpSession.phone_number,
+    p_api_id: String(otpSession.api_id),
+    p_api_hash: otpSession.api_hash,
+  })
+  if (storeError) {
+    console.error('[PERSIST] Failed to store telegram session:', storeError)
+    return json({ error: `تعذر حفظ جلسة Telegram: ${storeError.message}` }, 500)
   }
 
   // The OTP session has served its purpose; it holds an auth key so it must not linger.

@@ -9,9 +9,11 @@ import {
   NotificationDetailHeading,
   type NotificationDetail,
 } from '@/components/NotificationDetailDialog';
+import ConversationsPanel from '@/components/ConversationsPanel';
 import {
   Loader2,
   Inbox as InboxIcon,
+  MessagesSquare,
   Search,
   CheckCheck,
   Trash2,
@@ -40,6 +42,7 @@ const PAGE_SIZE = 25;
 
 type TypeFilter = 'all' | 'mention' | 'reply' | 'keyword';
 type ReadFilter = 'all' | 'unread' | 'read';
+type Tab = 'notifications' | 'conversations';
 
 export default function Inbox() {
   const { user, loading: authLoading } = useAuth();
@@ -52,6 +55,7 @@ export default function Inbox() {
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(1);
   const [busy, setBusy] = useState(false);
+  const [tab, setTab] = useState<Tab>('notifications');
 
   useEffect(() => {
     if (!authLoading && !user) setLocation('/login');
@@ -210,23 +214,52 @@ export default function Inbox() {
             )}
           </div>
 
-          <Button onClick={load} variant="outline" size="sm" className="rounded-lg" title="تحديث">
-            <RefreshCw className="w-4 h-4" />
-          </Button>
-          <Button
-            onClick={markAllRead}
-            disabled={busy || unreadCount === 0}
-            variant="outline"
-            size="sm"
-            className="rounded-lg flex items-center gap-2"
-          >
-            <CheckCheck className="w-4 h-4" />
-            تعليم الكل كمقروء
-          </Button>
+          {tab === 'notifications' && (
+            <>
+              <Button onClick={load} variant="outline" size="sm" className="rounded-lg" title="تحديث">
+                <RefreshCw className="w-4 h-4" />
+              </Button>
+              <Button
+                onClick={markAllRead}
+                disabled={busy || unreadCount === 0}
+                variant="outline"
+                size="sm"
+                className="rounded-lg flex items-center gap-2"
+              >
+                <CheckCheck className="w-4 h-4" />
+                تعليم الكل كمقروء
+              </Button>
+            </>
+          )}
+        </div>
+
+        <div className="container max-w-7xl mx-auto px-4 flex gap-1 -mb-px">
+          {(
+            [
+              ['notifications', 'الإشعارات', InboxIcon],
+              ['conversations', 'كل المحادثات', MessagesSquare],
+            ] as const
+          ).map(([value, label, Icon]) => (
+            <button
+              key={value}
+              onClick={() => setTab(value)}
+              className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors flex items-center gap-2 ${
+                tab === value
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-600 hover:text-gray-900'
+              }`}
+            >
+              <Icon className="w-4 h-4" />
+              {label}
+            </button>
+          ))}
         </div>
       </header>
 
       <div className="container max-w-7xl mx-auto px-4 py-6">
+        {tab === 'conversations' ? (
+          <ConversationsPanel />
+        ) : (
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
           {/* List */}
           <div className="lg:col-span-2">
@@ -443,6 +476,7 @@ export default function Inbox() {
             </div>
           </div>
         </div>
+        )}
       </div>
     </div>
   );
