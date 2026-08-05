@@ -1,7 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
+import { Button } from '@/components/ui/button';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Loader2, Users, Radio, User as UserIcon, Search } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -16,8 +24,13 @@ interface MonitoredChat {
 const KIND = {
   group: { label: 'مجموعة', Icon: Users },
   channel: { label: 'قناة', Icon: Radio },
-  private: { label: 'خاص', Icon: UserIcon },
+  private: { label: 'عضو', Icon: UserIcon },
 } as const;
+
+const PAGE_SIZE = 25;
+
+type TypeFilter = 'all' | 'group' | 'channel' | 'private';
+type SortKey = 'title' | 'type' | 'enabled';
 
 /**
  * Lets the user mute individual chats.
@@ -30,6 +43,9 @@ export default function MonitoredChatsPanel({ userId }: { userId: string | undef
   const [chats, setChats] = useState<MonitoredChat[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
+  const [sortKey, setSortKey] = useState<SortKey>('title');
+  const [page, setPage] = useState(1);
   const [saving, setSaving] = useState<string | null>(null);
 
   useEffect(() => {
@@ -40,7 +56,6 @@ export default function MonitoredChatsPanel({ userId }: { userId: string | undef
       .from('monitored_chats')
       .select('id, chat_id, chat_title, chat_type, enabled')
       .eq('user_id', userId)
-      .order('chat_title', { nullsFirst: false })
       .then(({ data, error }) => {
         if (!active) return;
         if (error) {
@@ -55,6 +70,46 @@ export default function MonitoredChatsPanel({ userId }: { userId: string | undef
       active = false;
     };
   }, [userId]);
+
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    const rows = chats.filter((c) => {
+      if (typeFilter !== 'all' && c.chat_type !== typeFilter) return false;
+      if (!needle) return true;
+      return (c.chat_title ?? c.chat_id).toLowerCase().includes(needle);
+    });
+
+    const byTitle = (a: MonitoredChat, b: MonitoredChat) =>
+      (a.chat_title ?? a.chat_id).localeCompare(b.chat_title ?? b.chat_id, 'ar');
+
+    return [...rows].sort((a, b) => {
+      if (sortKey === 'type') {
+        return (a.chat_type ?? '').localeCompare(b.chat_type ?? '') || byTitle(a, b);
+      }
+      if (sortKey === 'enabled') {
+        return Number(a.enabled) - Number(b.enabled) || byTitle(a, b);
+      }
+      return byTitle(a, b);
+    });
+  }, [chats, query, typeFilter, sortKey]);
+
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount);
+  const visible = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+
+  // Any change to the filters invalidates the current page number.
+  useEffect(() => setPage(1), [query, typeFilter, sortKey]);
+
+  const counts = useMemo(
+    () => ({
+      all: chats.length,
+      group: chats.filter((c) => c.chat_type === 'group').length,
+      channel: chats.filter((c) => c.chat_type === 'channel').length,
+      private: chats.filter((c) => c.chat_type === 'private').length,
+      muted: chats.filter((c) => !c.enabled).length,
+    }),
+    [chats],
+  );
 
   const toggle = async (chat: MonitoredChat) => {
     const next = !chat.enabled;
@@ -76,11 +131,6 @@ export default function MonitoredChatsPanel({ userId }: { userId: string | undef
     }
     toast.success(next ? 'تم تفعيل التنبيهات لهذه المحادثة' : 'تم كتم هذه المحادثة');
   };
-
-  const visible = chats.filter((c) =>
-    (c.chat_title ?? c.chat_id).toLowerCase().includes(query.trim().toLowerCase()),
-  );
-  const mutedCount = chats.filter((c) => !c.enabled).length;
 
   if (loading) {
     return (
@@ -107,22 +157,59 @@ export default function MonitoredChatsPanel({ userId }: { userId: string | undef
       <p className="text-sm text-gray-600">
         كل المحادثات مفعّلة افتراضياً. أوقف أي محادثة لا تريد تنبيهات منها — الإيقاف يشمل
         الإشارات والردود معاً.
-        {mutedCount > 0 && (
-          <span className="font-semibold text-gray-900"> ({mutedCount} مكتومة حالياً)</span>
+        {counts.muted > 0 && (
+          <span className="font-semibold text-gray-900"> ({counts.muted} مكتومة)</span>
         )}
       </p>
 
-      <div className="relative">
-        <Search className="w-4 h-4 text-gray-400 absolute top-1/2 -translate-y-1/2 right-3" />
-        <Input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="ابحث عن مجموعة أو قناة"
-          className="h-11 rounded-xl border-gray-300 pr-10"
-        />
+      {/* Type filter */}
+      <div className="flex flex-wrap gap-2">
+        {(
+          [
+            ['all', `الكل (${counts.all})`],
+            ['group', `المجموعات (${counts.group})`],
+            ['channel', `القنوات (${counts.channel})`],
+            ['private', `الأعضاء (${counts.private})`],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            onClick={() => setTypeFilter(value)}
+            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+              typeFilter === value
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
-      <div className="border border-gray-200 rounded-xl divide-y divide-gray-200 max-h-96 overflow-y-auto">
+      <div className="flex flex-col sm:flex-row gap-2">
+        <div className="relative flex-1">
+          <Search className="w-4 h-4 text-gray-400 absolute top-1/2 -translate-y-1/2 right-3" />
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="ابحث بالاسم"
+            className="h-11 rounded-xl border-gray-300 pr-10"
+          />
+        </div>
+
+        <Select value={sortKey} onValueChange={(v) => setSortKey(v as SortKey)}>
+          <SelectTrigger className="h-11 rounded-xl border-gray-300 sm:w-48">
+            <SelectValue placeholder="الترتيب" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="title">ترتيب بالاسم</SelectItem>
+            <SelectItem value="type">ترتيب بالنوع</SelectItem>
+            <SelectItem value="enabled">المكتومة أولاً</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="border border-gray-200 rounded-xl divide-y divide-gray-200">
         {visible.length === 0 ? (
           <p className="text-sm text-gray-500 text-center py-6">لا توجد نتائج مطابقة</p>
         ) : (
@@ -136,9 +223,7 @@ export default function MonitoredChatsPanel({ userId }: { userId: string | undef
                     chat.enabled ? 'bg-blue-100' : 'bg-gray-100'
                   }`}
                 >
-                  <Icon
-                    className={`w-4 h-4 ${chat.enabled ? 'text-blue-600' : 'text-gray-400'}`}
-                  />
+                  <Icon className={`w-4 h-4 ${chat.enabled ? 'text-blue-600' : 'text-gray-400'}`} />
                 </div>
 
                 <div className="flex-1 min-w-0">
@@ -162,6 +247,51 @@ export default function MonitoredChatsPanel({ userId }: { userId: string | undef
           })
         )}
       </div>
+
+      {pageCount > 1 && (
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <p className="text-xs text-gray-500">
+            {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filtered.length)}{' '}
+            من {filtered.length}
+          </p>
+
+          <div className="flex items-center gap-1" dir="ltr">
+            <Button
+              variant="outline"
+              size="sm"
+              className="rounded-lg h-8 px-2"
+              disabled={currentPage === 1}
+              onClick={() => setPage(currentPage - 1)}
+            >
+              ‹
+            </Button>
+
+            {Array.from({ length: pageCount }, (_, i) => i + 1).map((n) => (
+              <button
+                key={n}
+                onClick={() => setPage(n)}
+                className={`h-8 min-w-8 px-2 rounded-lg text-sm font-medium transition-colors ${
+                  n === currentPage
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                {n}
+              </button>
+            ))}
+
+            <Button
+              variant="outline"
+              size="sm"
+              className="rounded-lg h-8 px-2"
+              disabled={currentPage === pageCount}
+              onClick={() => setPage(currentPage + 1)}
+            >
+              ›
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

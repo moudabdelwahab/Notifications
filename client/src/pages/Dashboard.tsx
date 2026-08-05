@@ -9,6 +9,7 @@ import { Switch } from '@/components/ui/switch';
 import NotificationDetailDialog, {
   type NotificationDetail,
 } from '@/components/NotificationDetailDialog';
+import MonitoredChatsPanel from '@/components/MonitoredChatsPanel';
 import {
   Loader2,
   Bell,
@@ -380,6 +381,16 @@ export default function Dashboard() {
                   ))}
                 </div>
               )}
+            </div>
+
+            {/* Which chats to watch */}
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden mt-8">
+              <div className="p-6 border-b border-gray-200">
+                <h2 className="text-lg font-bold text-gray-900 font-display">المحادثات المراقَبة</h2>
+              </div>
+              <div className="p-6">
+                <MonitoredChatsPanel userId={user?.id} />
+              </div>
             </div>
           </div>
         </div>
