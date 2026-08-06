@@ -3,15 +3,16 @@
 
   <head>
     <meta charset="UTF-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+    <!-- No maximum-scale: capping it blocks pinch-zoom, which anyone with weak
+         eyesight relies on. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Telegram Mention Notifier - مراقب إشارات تيليجرام</title>
-    <meta name="description" content="تطبيق متقدم لمراقبة إشارات وردود تيليجرام مع إشعارات بالبريد الإلكتروني" />
+    <meta name="description" content="مراقبة إشارات وردود تيليجرام، مع عرض الإشعارات وصندوق وارد للمحادثات داخل صفحة الويب" />
     <meta name="theme-color" content="#0066FF" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <!-- Cairo carries Arabic glyphs; the whole interface is Arabic. -->
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap" rel="stylesheet" />
   </head>
 
   <body>

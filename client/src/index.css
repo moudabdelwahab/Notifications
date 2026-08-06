@@ -163,25 +163,28 @@
   }
 }
 
-/* Custom fonts */
-@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
-
+/* Fonts.
+   Cairo is loaded once from index.html. It was Inter and Poppins here, neither
+   of which carries Arabic glyphs — so every heading in this entirely Arabic
+   interface fell back to whatever the device happened to have, and .font-display
+   changed nothing. The stylesheet also re-imported them with an @import placed
+   after other rules, which the spec makes invalid and browsers drop. */
 html {
-  font-family: 'Inter', sans-serif;
+  font-family: 'Cairo', system-ui, sans-serif;
 }
 
 h1, h2, h3, h4, h5, h6 {
-  font-family: 'Poppins', sans-serif;
+  font-family: 'Cairo', system-ui, sans-serif;
   font-weight: 700;
 }
 
 .font-display {
-  font-family: 'Poppins', sans-serif;
+  font-family: 'Cairo', system-ui, sans-serif;
   font-weight: 700;
 }
 
 .font-body {
-  font-family: 'Inter', sans-serif;
+  font-family: 'Cairo', system-ui, sans-serif;
   font-weight: 400;
 }
 
@@ -234,4 +237,7 @@ button:active {
 /* Smooth scroll */
 html {
   scroll-behavior: smooth;
+  /* Safety net only. A page that scrolls sideways on a phone has an element
+     that is too wide — find it and fix it rather than relying on this. */
+  overflow-x: hidden;
 }
