@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useIsMobile } from '@/hooks/useMobile';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -87,6 +88,7 @@ function shortTime(iso: string | null): string {
  * and the browser never receives the Telegram session.
  */
 export default function ConversationsPanel() {
+  const isMobile = useIsMobile();
   const [chats, setChats] = useState<TelegramChat[]>([]);
   const [loadingChats, setLoadingChats] = useState(true);
   const [chatsError, setChatsError] = useState<string | null>(null);
@@ -506,8 +508,9 @@ export default function ConversationsPanel() {
                   {messages.map((message) => (
                     <div
                       key={message.id}
+                      // A shortcut for the mouse; the button below is the one
+                      // that works on a touchscreen.
                       onDoubleClick={() => setReplyTo(message)}
-                      title="نقرتان للرد على هذه الرسالة"
                       className={`flex ${message.outgoing ? 'justify-start' : 'justify-end'}`}
                     >
                       <div
@@ -534,6 +537,23 @@ export default function ConversationsPanel() {
                         >
                           {message.hasMedia && <Paperclip className="w-3 h-3" />}
                           <span>{shortTime(message.date)}</span>
+
+                          {activeChat.type !== 'channel' && (
+                            <button
+                              onClick={() => setReplyTo(message)}
+                              title="رد على هذه الرسالة"
+                              aria-label={`رد على رسالة ${message.senderName}`}
+                              // p-2 -m-1 keeps the icon small while giving the
+                              // finger a target it can actually hit.
+                              className={`ms-auto p-2 -m-1 rounded-lg transition-colors ${
+                                message.outgoing
+                                  ? 'text-blue-100 hover:bg-blue-500'
+                                  : 'text-gray-500 hover:bg-gray-200'
+                              }`}
+                            >
+                              <CornerUpLeft className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -615,8 +635,10 @@ export default function ConversationsPanel() {
                         onChange={(e) => setDraft(e.target.value.slice(0, MAX_MESSAGE_LENGTH))}
                         onKeyDown={(e) => {
                           // Enter sends, Shift+Enter makes a new line — the
-                          // convention in Telegram itself.
-                          if (e.key === 'Enter' && !e.shiftKey) {
+                          // convention in Telegram itself. Not on a phone,
+                          // where Enter is the only way to start a new line and
+                          // sending is what the button is for.
+                          if (!isMobile && e.key === 'Enter' && !e.shiftKey) {
                             e.preventDefault();
                             void send();
                           }

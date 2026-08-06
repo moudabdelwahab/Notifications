@@ -10,6 +10,7 @@ import {
   type NotificationDetail,
 } from '@/components/NotificationDetailDialog';
 import ConversationsPanel from '@/components/ConversationsPanel';
+import Pagination from '@/components/Pagination';
 import {
   Loader2,
   Inbox as InboxIcon,
@@ -92,7 +93,13 @@ export default function Inbox() {
           table: 'notifications',
           filter: `user_id=eq.${user.id}`,
         },
-        (payload) => setNotifications((prev) => [payload.new as Notification, ...prev]),
+        (payload) => {
+          const arrived = payload.new as Notification;
+          // A load() racing the insert may already hold this row.
+          setNotifications((prev) =>
+            prev.some((n) => n.id === arrived.id) ? prev : [arrived, ...prev],
+          );
+        },
       )
       .subscribe();
 
@@ -194,21 +201,24 @@ export default function Inbox() {
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white border-b border-gray-200 sticky top-0 z-40">
-        <div className="container max-w-7xl mx-auto px-4 py-4 flex items-center gap-4">
+        <div className="container max-w-7xl mx-auto px-3 sm:px-4 py-3 sm:py-4 flex items-center gap-2 sm:gap-4">
           <Button
             onClick={() => setLocation('/dashboard')}
             variant="ghost"
-            className="rounded-lg"
+            className="rounded-lg h-10 w-10 p-0 flex-shrink-0"
             title="رجوع إلى لوحة التحكم"
+            aria-label="رجوع إلى لوحة التحكم"
           >
             <ArrowRight className="w-5 h-5" />
           </Button>
 
-          <div className="flex items-center gap-2 flex-1">
-            <InboxIcon className="w-6 h-6 text-blue-600" />
-            <h1 className="text-2xl font-bold text-gray-900 font-display">صندوق الوارد</h1>
+          <div className="flex items-center gap-2 flex-1 min-w-0">
+            <InboxIcon className="w-5 h-5 sm:w-6 sm:h-6 text-blue-600 flex-shrink-0" />
+            <h1 className="text-lg sm:text-2xl font-bold text-gray-900 font-display truncate">
+              صندوق الوارد
+            </h1>
             {unreadCount > 0 && (
-              <span className="bg-blue-600 text-white text-xs font-bold rounded-full px-2 py-0.5">
+              <span className="bg-blue-600 text-white text-xs font-bold rounded-full px-2 py-0.5 flex-shrink-0">
                 {unreadCount}
               </span>
             )}
@@ -216,7 +226,14 @@ export default function Inbox() {
 
           {tab === 'notifications' && (
             <>
-              <Button onClick={load} variant="outline" size="sm" className="rounded-lg" title="تحديث">
+              <Button
+                onClick={load}
+                variant="outline"
+                size="sm"
+                className="rounded-lg h-10 w-10 p-0 flex-shrink-0"
+                title="تحديث"
+                aria-label="تحديث الإشعارات"
+              >
                 <RefreshCw className="w-4 h-4" />
               </Button>
               <Button
@@ -224,10 +241,12 @@ export default function Inbox() {
                 disabled={busy || unreadCount === 0}
                 variant="outline"
                 size="sm"
-                className="rounded-lg flex items-center gap-2"
+                className="rounded-lg h-10 flex items-center gap-2 flex-shrink-0"
+                title="تعليم الكل كمقروء"
+                aria-label="تعليم الكل كمقروء"
               >
                 <CheckCheck className="w-4 h-4" />
-                تعليم الكل كمقروء
+                <span className="hidden sm:inline">تعليم الكل كمقروء</span>
               </Button>
             </>
           )}
@@ -261,8 +280,10 @@ export default function Inbox() {
           <ConversationsPanel />
         ) : (
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-          {/* List */}
-          <div className="lg:col-span-2">
+          {/* List — on a phone this is a separate screen from the reading pane,
+              so opening a notification replaces it instead of leaving 25 rows
+              stacked above the detail. */}
+          <div className={`lg:col-span-2 ${selected ? 'hidden lg:block' : 'block'}`}>
             <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
               <div className="p-4 border-b border-gray-200 space-y-3">
                 <div className="relative">
@@ -387,45 +408,15 @@ export default function Inbox() {
               )}
 
               {pageCount > 1 && (
-                <div className="p-3 border-t border-gray-200 flex items-center justify-center gap-1" dir="ltr">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="rounded-lg h-8 px-2"
-                    disabled={currentPage === 1}
-                    onClick={() => setPage(currentPage - 1)}
-                  >
-                    ‹
-                  </Button>
-                  {Array.from({ length: pageCount }, (_, i) => i + 1).map((n) => (
-                    <button
-                      key={n}
-                      onClick={() => setPage(n)}
-                      className={`h-8 min-w-8 px-2 rounded-lg text-sm font-medium transition-colors ${
-                        n === currentPage
-                          ? 'bg-blue-600 text-white'
-                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                      }`}
-                    >
-                      {n}
-                    </button>
-                  ))}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="rounded-lg h-8 px-2"
-                    disabled={currentPage === pageCount}
-                    onClick={() => setPage(currentPage + 1)}
-                  >
-                    ›
-                  </Button>
+                <div className="p-3 border-t border-gray-200">
+                  <Pagination page={currentPage} pageCount={pageCount} onChange={setPage} />
                 </div>
               )}
             </div>
           </div>
 
           {/* Reading pane */}
-          <div className="lg:col-span-3">
+          <div className={`lg:col-span-3 ${selected ? 'block' : 'hidden lg:block'}`}>
             <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 lg:sticky lg:top-24">
               {!selected ? (
                 <div className="py-16 text-center">
@@ -435,9 +426,20 @@ export default function Inbox() {
               ) : (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between gap-3 flex-wrap pb-4 border-b border-gray-200">
-                    <h2 className="text-lg font-bold text-gray-900 font-display">
-                      <NotificationDetailHeading notification={selected} />
-                    </h2>
+                    <div className="flex items-center gap-1 min-w-0">
+                      <Button
+                        onClick={() => setSelectedId(null)}
+                        variant="ghost"
+                        className="lg:hidden h-10 w-10 p-0 rounded-lg flex-shrink-0"
+                        title="رجوع إلى القائمة"
+                        aria-label="رجوع إلى القائمة"
+                      >
+                        <ArrowRight className="w-5 h-5" />
+                      </Button>
+                      <h2 className="text-lg font-bold text-gray-900 font-display min-w-0">
+                        <NotificationDetailHeading notification={selected} />
+                      </h2>
+                    </div>
 
                     <div className="flex items-center gap-2">
                       <Button

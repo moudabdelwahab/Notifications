@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useLocation } from 'wouter';
 import { useAuth } from '@/hooks/useAuth';
 import { useOnboardingStatus } from '@/hooks/useOnboardingStatus';
-import { useNextScanCountdown } from '@/hooks/useNextScanCountdown';
+import { useLastScan } from '@/hooks/useLastScan';
 import { supabase } from '@/lib/supabase';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
@@ -50,6 +50,33 @@ const TYPE_STYLE = {
 
 type TypeFilter = 'all' | 'mention' | 'reply' | 'keyword';
 
+/**
+ * How the last-scan reading is presented.
+ *
+ * The notes say what is actually true rather than promising a cadence: the
+ * monitor runs on GitHub's scheduled workflows, which slip to roughly hourly on
+ * a quiet repository. Each run resumes from the previous one, so a late scan
+ * delays notifications without dropping any.
+ */
+const SCAN_STATE = {
+  unknown: {
+    fg: 'text-gray-400',
+    note: 'لم يتم أي فحص لحسابك بعد. أول فحص هو اللي بيبني قائمة المحادثات.',
+  },
+  fresh: {
+    fg: 'text-gray-900',
+    note: 'الفحص بيشتغل على جدولة GitHub، وغالباً بيتأخر لساعة تقريباً. كل فحص بيكمّل من آخر نقطة، فمفيش إشارة أو رد بيضيع.',
+  },
+  late: {
+    fg: 'text-amber-600',
+    note: 'أطول من المعتاد — جدولة GitHub بتتأخر أحياناً. الفحص الجاي هيقرأ الفترة دي كلها، فمفيش حاجة بتضيع.',
+  },
+  stalled: {
+    fg: 'text-red-600',
+    note: 'مرّ وقت طويل من غير فحص. لو استمر كدا، اتأكد إن حساب Telegram لسه مربوط.',
+  },
+} as const;
+
 export default function Dashboard() {
   const { user, loading: authLoading, signOut } = useAuth();
   const { state: onboarding } = useOnboardingStatus(user?.id);
@@ -62,8 +89,8 @@ export default function Dashboard() {
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
   const [query, setQuery] = useState('');
   const [markingAll, setMarkingAll] = useState(false);
-  const nextScan = useNextScanCountdown(() => {
-    // A scheduled scan just landed; pull anything realtime may have missed.
+  const lastScan = useLastScan(user?.id, () => {
+    // A scan genuinely landed; pull anything realtime may have missed.
     void loadNotifications();
   });
 
@@ -97,10 +124,12 @@ export default function Dashboard() {
             filter: `user_id=eq.${user.id}`,
           },
           (payload) => {
-            console.log('New notification received:', payload);
-            const newNotification = payload.new as Notification;
-            setNotifications((prev) => [newNotification, ...prev]);
-            toast.info(`إشعار جديد من ${newNotification.sender_name}`);
+            const arrived = payload.new as Notification;
+            // A refetch racing the insert may already hold this row.
+            setNotifications((prev) =>
+              prev.some((n) => n.id === arrived.id) ? prev : [arrived, ...prev],
+            );
+            toast.info(`إشعار جديد من ${arrived.sender_name}`);
           }
         )
         .subscribe();
@@ -203,9 +232,10 @@ export default function Dashboard() {
 
       if (error) throw error;
 
-      setNotifications(notifications.map(n =>
-        n.id === notificationId ? { ...n, read: true } : n
-      ));
+      // Functional, so a notification arriving over realtime mid-update survives.
+      setNotifications((prev) =>
+        prev.map((n) => (n.id === notificationId ? { ...n, read: true } : n)),
+      );
     } catch (err) {
       toast.error('خطأ في تحديث الإشعار');
     }
@@ -242,25 +272,28 @@ export default function Dashboard() {
       {/* Header */}
       <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
         <div className="container max-w-6xl mx-auto px-3 sm:px-4 py-3 sm:py-4 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center">
-              <Bell className="w-6 h-6 text-white" />
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+            <div className="w-9 h-9 sm:w-10 sm:h-10 bg-blue-600 rounded-lg flex items-center justify-center flex-shrink-0">
+              <Bell className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
             </div>
-            <h1 className="text-2xl font-bold text-gray-900 font-display">Telegram Notifier</h1>
+            <h1 className="text-lg sm:text-2xl font-bold text-gray-900 font-display truncate">
+              Telegram Notifier
+            </h1>
           </div>
 
-          <div className="flex items-center gap-4">
-            <div className="text-right">
+          <div className="flex items-center gap-2 sm:gap-4 min-w-0">
+            {/* A long address squeezes the logout button off a narrow screen. */}
+            <div className="text-right hidden sm:block min-w-0">
               <p className="text-sm text-gray-600">مرحباً</p>
-              <p className="font-semibold text-gray-900">{user?.email}</p>
+              <p className="font-semibold text-gray-900 truncate max-w-[16rem]">{user?.email}</p>
             </div>
             <Button
               onClick={handleLogout}
               variant="outline"
-              className="rounded-lg flex items-center gap-2"
+              className="rounded-lg flex items-center gap-2 flex-shrink-0"
             >
               <LogOut className="w-4 h-4" />
-              تسجيل الخروج
+              <span className="hidden sm:inline">تسجيل الخروج</span>
             </Button>
           </div>
         </div>
@@ -288,28 +321,25 @@ export default function Dashboard() {
 
                 <div className="pt-4 border-t border-gray-200">
                   <div className="flex items-center justify-between mb-2">
-                    <p className="text-sm text-gray-600">الفحص التالي بعد</p>
+                    <p className="text-sm text-gray-600">آخر فحص</p>
                     <button
                       onClick={loadNotifications}
                       title="تحديث الآن"
-                      className="text-gray-400 hover:text-blue-600 transition-colors"
+                      aria-label="تحديث الإشعارات الآن"
+                      className="text-gray-400 hover:text-blue-600 transition-colors p-2 -m-2 rounded-lg"
                     >
                       <RefreshCw className="w-4 h-4" />
                     </button>
                   </div>
-                  <p className="text-3xl font-bold text-gray-900 tabular-nums" dir="ltr">
-                    {nextScan.label}
+
+                  <p className={`text-2xl font-bold ${SCAN_STATE[lastScan.state].fg}`}>
+                    {lastScan.label}
                   </p>
-                  <div className="mt-2 h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-blue-600 transition-[width] duration-1000 ease-linear"
-                      style={{ width: `${nextScan.progress * 100}%` }}
-                    />
-                  </div>
+
                   <p className="text-xs text-gray-500 mt-2">
-                    {monitoringEnabled
-                      ? 'قد يتأخر التشغيل المجدول على GitHub بضع دقائق عند الضغط'
-                      : 'المراقبة متوقفة — فعّلها ليبدأ الفحص'}
+                    {!monitoringEnabled
+                      ? 'المراقبة متوقفة — فعّلها ليبدأ الفحص'
+                      : SCAN_STATE[lastScan.state].note}
                   </p>
                 </div>
 

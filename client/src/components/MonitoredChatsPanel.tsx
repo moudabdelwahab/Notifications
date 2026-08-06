@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
-import { Button } from '@/components/ui/button';
+import Pagination from '@/components/Pagination';
 import {
   Select,
   SelectContent,
@@ -249,47 +249,12 @@ export default function MonitoredChatsPanel({ userId }: { userId: string | undef
       </div>
 
       {pageCount > 1 && (
-        <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
           <p className="text-xs text-gray-500">
             {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filtered.length)}{' '}
             من {filtered.length}
           </p>
-
-          <div className="flex items-center gap-1" dir="ltr">
-            <Button
-              variant="outline"
-              size="sm"
-              className="rounded-lg h-8 px-2"
-              disabled={currentPage === 1}
-              onClick={() => setPage(currentPage - 1)}
-            >
-              ‹
-            </Button>
-
-            {Array.from({ length: pageCount }, (_, i) => i + 1).map((n) => (
-              <button
-                key={n}
-                onClick={() => setPage(n)}
-                className={`h-8 min-w-8 px-2 rounded-lg text-sm font-medium transition-colors ${
-                  n === currentPage
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
-              >
-                {n}
-              </button>
-            ))}
-
-            <Button
-              variant="outline"
-              size="sm"
-              className="rounded-lg h-8 px-2"
-              disabled={currentPage === pageCount}
-              onClick={() => setPage(currentPage + 1)}
-            >
-              ›
-            </Button>
-          </div>
+          <Pagination page={currentPage} pageCount={pageCount} onChange={setPage} />
         </div>
       )}
     </div>
