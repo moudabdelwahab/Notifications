@@ -208,7 +208,12 @@ export default function ConversationsPanel() {
         attachment: attachment?.payload ?? null,
       });
       retryKeyRef.current = null;
-      setMessages((prev) => [...prev, message]);
+      // A retry after a lost response replays the original message, and the
+      // background poll may already have picked it up — appending blindly would
+      // show it twice.
+      setMessages((prev) =>
+        prev.some((m) => m.id === message.id) ? prev : [...prev, message],
+      );
       setDraft('');
       setReplyTo(null);
       clearAttachment();
