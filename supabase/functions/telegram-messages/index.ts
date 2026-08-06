@@ -117,6 +117,13 @@ async function openClient(creds: Credentials): Promise<TelegramClient> {
   // Sessions are stored in Telethon's format for the Python worker.
   await client.importSession(convertFromTelethonSession(creds.session_data!))
   await client.connect()
+
+  // A Telethon session carries no self info, and the storage is fresh every
+  // invocation. sendMedia needs it — it checks the account's upload limits — and
+  // fails with "User info is not cached (yet)" without it. One cheap call here
+  // beats a confusing 500 at send time.
+  await client.getMe()
+
   return client
 }
 
