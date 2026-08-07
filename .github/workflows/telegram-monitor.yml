@@ -13,17 +13,30 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: '3.10'
+          # 3.10's datetime.fromisoformat only accepts a 3- or 6-digit
+          # fractional second, which is what stalled the worker for 32 hours on
+          # a Postgres timestamp rendered with 4. The parser no longer depends
+          # on this, but there is no reason to stay on the version that cannot
+          # read its own database.
+          python-version: '3.12'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r server/workers/requirements.txt
+
+      # Cheap, and it runs on the same interpreter the scan will use — the last
+      # outage was a parser that worked locally and not on the runner.
+      - name: Check timestamp parsing
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python server/workers/test_timestamps.py
 
       - name: Run Telegram Monitor
         env:
