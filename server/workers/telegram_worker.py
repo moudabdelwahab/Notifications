@@ -16,6 +16,7 @@ one run per hour, and a fixed 6-minute lookback dropped everything in between.
 import asyncio
 import base64
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -38,7 +39,10 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 # gaps of several hours happen. So each run resumes from where the last one
 # finished rather than assuming the schedule was honoured.
 OVERLAP = timedelta(minutes=1)  # re-check a little either side of the boundary
-MAX_LOOKBACK = timedelta(hours=24)  # first run, or after a long outage
+# Ceiling for recovering from an outage, not a normal window. A stuck worker has
+# already cost 32 hours once; 72 lets the first run afterwards cover the whole
+# gap instead of silently skipping the oldest part of it.
+MAX_LOOKBACK = timedelta(hours=72)
 DEFAULT_LOOKBACK = timedelta(hours=1)  # no recorded scan yet
 # None = every dialog, including archived ones. A fixed limit silently ignored
 # chats past the cutoff.
@@ -136,6 +140,46 @@ def chat_kind(dialog) -> str:
     return "private"
 
 
+_FRACTION = re.compile(r"\.(\d+)")
+
+
+def parse_pg_timestamp(value) -> datetime | None:
+    """
+    Reads a Postgres timestamptz, whatever precision it comes back with.
+
+    `datetime.fromisoformat` before Python 3.11 accepts a fractional second of
+    exactly three or six digits and nothing else. Postgres stores microseconds
+    but trims trailing zeros when rendering, so a timestamp whose microseconds
+    end in a zero — about one in ten — comes back with four or five digits and
+    was rejected outright.
+
+    That is not a hypothetical: run #717 wrote 07:09:04.900200, Postgres
+    rendered it '2026-08-06T07:09:04.9002+00:00', and every run afterwards died
+    reading it back. Nothing rewrites last_scanned_at until a scan finishes, so
+    a single unlucky value stopped monitoring for 32 hours.
+
+    Padding the fraction to six digits makes the parse independent of both the
+    interpreter version and how many digits Postgres felt like printing.
+    Returns None for anything genuinely unreadable — the caller falls back to a
+    default window rather than bringing the run down.
+    """
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    text = str(value).strip().replace("Z", "+00:00")
+    text = _FRACTION.sub(lambda m: "." + m.group(1)[:6].ljust(6, "0"), text, count=1)
+
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        print(f"WARN: could not parse timestamp {value!r}", file=sys.stderr)
+        return None
+
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def scan_since(last_scanned_at) -> datetime:
     """
     Where this run should start reading from.
@@ -145,16 +189,34 @@ def scan_since(last_scanned_at) -> datetime:
     outage does not turn into an unbounded backfill.
     """
     now = datetime.now(timezone.utc)
-    if not last_scanned_at:
+    parsed = parse_pg_timestamp(last_scanned_at)
+    if parsed is None:
         return now - DEFAULT_LOOKBACK
 
-    parsed = datetime.fromisoformat(str(last_scanned_at).replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
     return max(parsed - OVERLAP, now - MAX_LOOKBACK)
 
 
 async def process_user(user_id, api_id, api_hash, session_str, last_scanned_at) -> bool:
+    """
+    Scans one account, reporting success rather than raising.
+
+    Everything up to the client's own try block used to run unguarded, so a
+    failure there escaped into asyncio.gather and took the whole run with it —
+    which is how a single unparseable timestamp stopped monitoring for every
+    account at once. Nothing in here may propagate.
+    """
+    try:
+        return await _scan_account(user_id, api_id, api_hash, session_str, last_scanned_at)
+    except Exception as exc:
+        print(f"[{user_id}] ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        # Recorded so the dashboard's session banner shows it. The previous
+        # crash left the status on 'active' and the failure was invisible in the
+        # app for 32 hours.
+        set_session_status(user_id, "invalid", f"توقف الفحص بسبب خطأ: {type(exc).__name__}")
+        return False
+
+
+async def _scan_account(user_id, api_id, api_hash, session_str, last_scanned_at) -> bool:
     """Returns True when the account was scanned successfully."""
     since = scan_since(last_scanned_at)
     print(f"[{user_id}] scanning messages since {since.isoformat()}")
@@ -404,9 +466,15 @@ async def main() -> int:
         print(f"No active monitoring sessions found ({skipped} skipped).")
         return 0
 
-    results = await asyncio.gather(*tasks)
-    failed = results.count(False)
-    print(f"Processed {len(results)} account(s): {results.count(True)} ok, {failed} failed, {skipped} skipped.")
+    # return_exceptions so one account cannot cancel the others' scans.
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException):
+            print(f"UNCAUGHT: {type(result).__name__}: {result}", file=sys.stderr)
+
+    succeeded = sum(1 for r in results if r is True)
+    failed = len(results) - succeeded
+    print(f"Processed {len(results)} account(s): {succeeded} ok, {failed} failed, {skipped} skipped.")
 
     # Surface failures as a red run instead of a green one that did nothing.
     return 1 if failed else 0
